@@ -1,0 +1,71 @@
+name: Application CI
+
+on:
+  pull_request:
+    branches: [dev, stage, prod]
+  push:
+    branches: [dev, stage, prod]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Build and validate .NET
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Restore web app and tests
+        run: |
+          dotnet restore src/HelpDeskCloud/HelpDeskCloud.csproj
+          dotnet restore tests/HelpDeskCloud.Tests/HelpDeskCloud.Tests.csproj
+      - name: Compile web app
+        run: dotnet build src/HelpDeskCloud/HelpDeskCloud.csproj -c Release --no-restore
+      - name: Execute validation tests
+        run: dotnet run --project tests/HelpDeskCloud.Tests/HelpDeskCloud.Tests.csproj -c Release --no-restore
+
+  docker:
+    name: Build container image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Build image (no cloud credentials)
+        run: docker build --tag helpdeskcloud:ci .
+      - name: Scan container for critical vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: helpdeskcloud:ci
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: CRITICAL
+
+  helm:
+    name: Validate Helm chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
+      - name: Lint and render chart
+        run: |
+          helm lint helm/helpdesk --set image.repository=example.invalid/helpdesk
+          helm template helpdesk helm/helpdesk --set image.repository=example.invalid/helpdesk --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa > /tmp/helpdesk-manifests.yaml

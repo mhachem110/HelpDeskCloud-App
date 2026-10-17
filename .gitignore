@@ -1,0 +1,27 @@
+# .NET
+**/bin/
+**/obj/
+**/TestResults/
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.cache
+# Secrets and local settings
+.env
+.env.*
+!.env.example
+**/appsettings.Development.json
+**/appsettings.Production.json
+**/secrets.json
+*.pfx
+*.pem
+*.key
+# Operating system
+.DS_Store
+Thumbs.db
+# Local artifacts
+*.zip
+*.log
+coverage/

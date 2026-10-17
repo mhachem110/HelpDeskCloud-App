@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f9fc">
+  <meta name="description" content="HelpDesk Cloud — a modern IT service ticket dashboard.">
+  <title>HelpDesk Cloud | IT Service Desk</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/styles.css">
+  <script src="/js/app.js" defer></script>
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" aria-label="Primary navigation">
+      <a class="brand" href="/" aria-label="HelpDesk Cloud home">
+        <span class="brand-symbol">H<span class="brand-dot"></span></span>
+        <span><strong>HelpDesk</strong><small>Cloud Platform</small></span>
+      </a>
+      <div class="workspace-label">WORKSPACE</div>
+      <nav class="navigation">
+        <a class="nav-item active" href="#dashboard" aria-current="page"><span class="nav-icon">▦</span> Dashboard</a>
+        <a class="nav-item" href="#tickets"><span class="nav-icon">☷</span> Support Tickets</a>
+        <a class="nav-item" href="#activity"><span class="nav-icon">◷</span> Activity Overview</a>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="platform-card"><div class="platform-icon">☁</div><strong>Cloud ready</strong><p>Built for container deployment on Google Kubernetes Engine.</p></div>
+        <div class="sidebar-footer"><span class="online-dot"></span> Platform Console <span class="version">v1.0</span></div>
+      </div>
+    </aside>
+
+    <main class="main" id="dashboard">
+      <header class="topbar">
+        <div class="breadcrumb">Workspace <span>/</span> <b>Overview</b></div>
+        <div class="top-right"><span class="environment-chip"><span class="online-dot"></span> Demo environment</span><span class="avatar" aria-label="Demo user">HD</span></div>
+      </header>
+      <div class="page-container">
+        <div class="page-heading">
+          <div><div class="eyebrow">OPERATIONS OVERVIEW</div><h1>Service Desk Dashboard</h1><p>Track support requests, organize priorities, and keep issues moving.</p></div>
+          <button class="button button-primary" type="button" id="new-ticket"><span class="plus">＋</span> New Ticket</button>
+        </div>
+
+        <section class="summary-grid" aria-label="Ticket summary">
+          <div class="stat-card"><div class="stat-title">Total Tickets <span class="stat-icon blue">▤</span></div><div class="stat-number" id="stat-total">—</div><div class="stat-caption">All support requests</div></div>
+          <div class="stat-card"><div class="stat-title">Open Tickets <span class="stat-icon amber">◌</span></div><div class="stat-number" id="stat-open">—</div><div class="stat-caption"><span class="accent amber-text">●</span> Awaiting action</div></div>
+          <div class="stat-card"><div class="stat-title">In Progress <span class="stat-icon violet">◷</span></div><div class="stat-number" id="stat-progress">—</div><div class="stat-caption">Currently being handled</div></div>
+          <div class="stat-card"><div class="stat-title">Resolved <span class="stat-icon green">✓</span></div><div class="stat-number" id="stat-resolved">—</div><div class="stat-caption"><span class="accent green-text">●</span> Successfully completed</div></div>
+        </section>
+
+        <section class="content-grid">
+          <div class="tickets-panel" id="tickets">
+            <div class="panel-top"><div><h2>Support Tickets</h2><p>Manage and track all incoming requests.</p></div><span class="count-chip" id="ticket-count">0 tickets</span></div>
+            <div class="tools-row">
+              <label class="search-box"><span aria-hidden="true">⌕</span><input type="search" id="search" placeholder="Search tickets..." maxlength="100" autocomplete="off" aria-label="Search tickets"></label>
+              <select id="filter-status" aria-label="Filter tickets by status"><option value="">All Statuses</option><option>Open</option><option>In Progress</option><option>Resolved</option></select>
+              <select id="filter-priority" aria-label="Filter tickets by priority"><option value="">All Priorities</option><option>Low</option><option>Medium</option><option>High</option><option>Critical</option></select>
+            </div>
+            <div class="table-scroll">
+              <table aria-label="Support ticket list"><thead><tr><th>Ticket</th><th>Category</th><th>Priority</th><th>Status</th><th>Created</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody id="tickets-body"><tr><td colspan="6" class="loading-row">Loading tickets...</td></tr></tbody></table>
+            </div>
+            <div id="empty-state" class="empty-state" hidden><span class="empty-icon">☷</span><h3>No tickets found</h3><p>Create a ticket or change the filters to see more results.</p></div>
+            <div class="panel-footer"><span id="result-caption">Showing 0 tickets</span><span>Displaying the 200 most recent matching records</span></div>
+          </div>
+          <div class="right-panels" id="activity">
+            <section class="mini-panel"><h2>Ticket Health</h2><p>Current service workload</p><div class="donut-holder"><div class="donut" id="donut"><div class="donut-inner"><strong id="resolved-percent">0%</strong><span>resolved</span></div></div></div><div class="legend"><span><i class="dot green-bg"></i> Resolved</span><strong id="legend-resolved">0</strong></div><div class="legend"><span><i class="dot amber-bg"></i> Open</span><strong id="legend-open">0</strong></div><div class="legend"><span><i class="dot violet-bg"></i> In Progress</span><strong id="legend-progress">0</strong></div></section>
+            <section class="mini-panel note-panel"><div class="note-icon">⚡</div><h2>Stay on top of issues</h2><p>Prioritize critical tickets and track progress from your team's central dashboard.</p><button class="button button-outline" id="quick-create" type="button">Create a support ticket →</button></section>
+          </div>
+        </section>
+        <footer class="page-footer">HelpDesk Cloud · Capstone Application <span>ASP.NET Core + PostgreSQL · Built for GKE</span></footer>
+      </div>
+    </main>
+  </div>
+
+  <dialog class="ticket-dialog" id="ticket-dialog" aria-labelledby="dialog-title">
+    <form id="ticket-form" class="ticket-form">
+      <div class="dialog-top"><div><div class="eyebrow">SERVICE DESK</div><h2 id="dialog-title">Create Support Ticket</h2><p>Enter the details of your IT support request.</p></div><button type="button" class="icon-button" id="close-dialog" aria-label="Close dialog">✕</button></div>
+      <div class="dialog-content">
+        <label for="ticket-title">Ticket title <span class="required">*</span></label><input id="ticket-title" name="title" type="text" minlength="4" maxlength="120" placeholder="e.g. Cannot connect to company VPN" required>
+        <label for="ticket-description">Description</label><textarea id="ticket-description" name="description" maxlength="2000" rows="4" placeholder="Describe the issue and steps to reproduce it..."></textarea>
+        <div class="form-grid"><div><label for="ticket-category">Category <span class="required">*</span></label><select id="ticket-category" name="category" required><option value="Access">Access</option><option value="Hardware">Hardware</option><option value="Software">Software</option><option value="Network">Network</option><option value="Other">Other</option></select></div><div><label for="ticket-priority">Priority <span class="required">*</span></label><select id="ticket-priority" name="priority" required><option value="Low">Low</option><option value="Medium" selected>Medium</option><option value="High">High</option><option value="Critical">Critical</option></select></div></div>
+        <div id="status-field" hidden><label for="ticket-status">Ticket status</label><select id="ticket-status" name="status"><option>Open</option><option>In Progress</option><option>Resolved</option></select></div>
+        <p id="form-error" class="form-error" role="alert" hidden></p>
+      </div>
+      <div class="dialog-actions"><button class="button button-outline" id="cancel-dialog" type="button">Cancel</button><button class="button button-primary" id="save-ticket" type="submit">Create Ticket</button></div>
+    </form>
+  </dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
