@@ -1,3 +1,10 @@
+{{- if .Values.application.enabled }}
+{{- if and .Values.image.requireDigest (not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.image.digest)) }}
+{{- fail "A real immutable application image digest is required" }}
+{{- end }}
+{{- if and .Values.cloudSqlProxy.enabled (not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.cloudSqlProxy.image.digest)) }}
+{{- fail "A real immutable Cloud SQL Auth Proxy image digest is required" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -51,11 +58,16 @@ spec:
           env:
             - name: ASPNETCORE_URLS
               value: "http://+:8080"
+            {{- if .Values.database.connectionFile.enabled }}
+            - name: DATABASE_CONNECTION_STRING_FILE
+              value: {{ .Values.database.connectionFile.path | quote }}
+            {{- else }}
             - name: ConnectionStrings__Default
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.database.secretName | quote }}
                   key: {{ .Values.database.secretKey | quote }}
+            {{- end }}
           readinessProbe:
             httpGet:
               path: /health/ready
@@ -83,3 +95,61 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          {{- if .Values.database.connectionFile.enabled }}
+          volumeMounts:
+            - name: db-connection
+              mountPath: /var/secrets
+              readOnly: true
+          {{- end }}
+        {{- if .Values.cloudSqlProxy.enabled }}
+        # The proxy authenticates through the Pod's Workload Identity and listens only in this Pod.
+        - name: cloud-sql-proxy
+          image: "{{ required "proxy image repository required" .Values.cloudSqlProxy.image.repository }}@{{ .Values.cloudSqlProxy.image.digest }}"
+          args:
+            - --private-ip
+            - --address=127.0.0.1
+            - --port=5432
+            - --health-check
+            - --http-address=0.0.0.0
+            - --http-port=9090
+            - {{ required "Cloud SQL instance connection name required" .Values.cloudSqlProxy.instanceConnectionName | quote }}
+          ports:
+            - name: proxy-health
+              containerPort: 9090
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: proxy-health
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /readiness
+              port: proxy-health
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /liveness
+              port: proxy-health
+            periodSeconds: 30
+          resources:
+            {{- toYaml .Values.cloudSqlProxy.resources | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+        {{- end }}
+      {{- if .Values.database.connectionFile.enabled }}
+      volumes:
+        - name: db-connection
+          csi:
+            driver: secrets-store-gke.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ .Values.database.connectionFile.providerClass | quote }}
+      {{- end }}
+{{- end }}

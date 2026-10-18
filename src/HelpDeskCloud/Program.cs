@@ -19,9 +19,21 @@ builder.Services.AddRateLimiter(options =>
             _ => new FixedWindowRateLimiterOptions { PermitLimit = 120, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
 });
 
-var connectionString = builder.Configuration.GetConnectionString("Default") ?? builder.Configuration["DATABASE_URL"];
+// GKE mounts the connection string as a file; Compose keeps its environment setting.
+var connectionFile = builder.Configuration["DATABASE_CONNECTION_STRING_FILE"];
+string? connectionString;
+if (!string.IsNullOrWhiteSpace(connectionFile))
+{
+    if (!File.Exists(connectionFile))
+        throw new InvalidOperationException("The mounted database connection file is missing.");
+    connectionString = File.ReadAllText(connectionFile).Trim();
+}
+else
+{
+    connectionString = builder.Configuration.GetConnectionString("Default") ?? builder.Configuration["DATABASE_URL"];
+}
 if (string.IsNullOrWhiteSpace(connectionString))
-    throw new InvalidOperationException("Set ConnectionStrings__Default or DATABASE_URL in the environment. Never commit actual credentials.");
+    throw new InvalidOperationException("Database connection configuration is missing. Set the configured environment value or mount the secret file.");
 
 builder.Services.AddSingleton(_ => new NpgsqlDataSourceBuilder(connectionString).Build());
 builder.Services.AddScoped<TicketRepository>();

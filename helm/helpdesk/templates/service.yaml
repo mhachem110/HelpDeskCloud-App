@@ -1,3 +1,7 @@
+{{- if .Values.application.enabled }}
+{{- if and .Values.database.connectionFile.enabled (ne .Values.service.type "ClusterIP") }}
+{{- fail "Dev application Service must remain ClusterIP" }}
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -14,3 +18,4 @@ spec:
       port: {{ .Values.service.port }}
       targetPort: {{ .Values.service.targetPort }}
       protocol: TCP
+{{- end }}

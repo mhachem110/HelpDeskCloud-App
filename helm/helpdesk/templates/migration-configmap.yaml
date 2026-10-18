@@ -1,0 +1,12 @@
+{{- if .Values.database.connectionFile.enabled }}
+# Versioned SQL is mounted into a manually dispatched one-time Job.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: helpdesk-dev-schema-001
+data:
+  001_init.sql: |
+{{ .Files.Get "files/001_init.sql" | indent 4 }}
+  002_grants.sql: |
+{{ .Files.Get "files/002_grants.sql" | indent 4 }}
+{{- end }}
