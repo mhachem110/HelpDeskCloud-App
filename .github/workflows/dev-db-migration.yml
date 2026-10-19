@@ -3,8 +3,16 @@ name: Approved Dev database migration
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: Run read-only connectivity diagnostics or the separately approved one-time migration.
+        required: true
+        type: choice
+        options:
+          - diagnostic
+          - migration
+        default: migration
       confirmation:
-        description: Type RUN helpdesk-dev-schema-001 only after reviewing the SQL and migration plan.
+        description: Type DIAGNOSE helpdesk-dev-gke or RUN helpdesk-dev-schema-001 for the selected mode.
         required: true
         type: string
         default: DO NOT RUN
@@ -27,24 +35,38 @@ env:
 
 jobs:
   preflight:
-    name: Require the disabled-by-default migration gate and explicit confirmation
+    name: Check diagnostic or migration dispatch gates
     if: github.repository == 'mhachem110/HelpDeskCloud-App'
     runs-on: ubuntu-latest
     steps:
       - name: Reject unapproved refs and dispatches
         env:
           ENABLED: ${{ vars.DEV_DB_MIGRATION_ENABLED }}
+          MODE: ${{ inputs.mode }}
           CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           set -euo pipefail
           [[ "$GITHUB_REF" == 'refs/heads/dev' ]] || { echo '::error::Database migration is limited to the protected dev branch.'; exit 1; }
-          [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]] || { echo '::error::Database migration is manual-only.'; exit 1; }
-          [[ "$ENABLED" == 'true' ]] || { echo '::error::Set DEV_DB_MIGRATION_ENABLED=true only after reviewing all prerequisites.'; exit 1; }
-          [[ "$CONFIRMATION" == 'RUN helpdesk-dev-schema-001' ]] || { echo '::error::Type the exact migration confirmation to continue.'; exit 1; }
+          [[ "$GITHUB_REPOSITORY" == 'mhachem110/HelpDeskCloud-App' ]] || { echo '::error::Unexpected repository.'; exit 1; }
+          [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]] || { echo '::error::This workflow is manual-only.'; exit 1; }
+          case "$MODE" in
+            diagnostic)
+              [[ "$CONFIRMATION" == 'DIAGNOSE helpdesk-dev-gke' ]] || { echo '::error::Type the exact diagnostic confirmation to continue.'; exit 1; }
+              ;;
+            migration)
+              [[ "$ENABLED" == 'true' ]] || { echo '::error::Set DEV_DB_MIGRATION_ENABLED=true only after reviewing all prerequisites.'; exit 1; }
+              [[ "$CONFIRMATION" == 'RUN helpdesk-dev-schema-001' ]] || { echo '::error::Type the exact migration confirmation to continue.'; exit 1; }
+              ;;
+            *)
+              echo '::error::Choose diagnostic or migration mode.'
+              exit 1
+              ;;
+          esac
 
   render:
     name: Lint and render the one-time Job without cloud credentials
     needs: preflight
+    if: inputs.mode == 'migration'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -92,8 +114,9 @@ jobs:
           if-no-files-found: error
 
   execute:
-    name: Separately approved one-time schema migration
-    needs: render
+    name: Read-only diagnostics or separately approved one-time schema migration
+    needs: [preflight, render]
+    if: ${{ always() && needs.preflight.result == 'success' && (inputs.mode == 'diagnostic' || needs.render.result == 'success') }}
     environment: dev-db-migration
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -107,6 +130,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions/download-artifact@v4.3.0
+        if: inputs.mode == 'migration'
         with:
           name: approved-dev-migration-manifest-${{ github.run_id }}
           path: ${{ runner.temp }}/dev-migration
@@ -122,12 +146,52 @@ jobs:
           workload_identity_provider: projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/github-app-migration-dev
           service_account: helpdesk-app-migr-runner-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
       - uses: google-github-actions/get-gke-credentials@v3
+        id: gke-token
         with:
           project_id: helpdeskcloud-capstone-511905
           cluster_name: helpdeskcloud-dev-gke
           location: us-east1
           use_dns_based_endpoint: true
+          use_auth_provider: false
+      - name: Install the supported GKE authentication plugin
+        if: inputs.mode == 'diagnostic'
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          version: '>= 363.0.0'
+          install_components: gke-gcloud-auth-plugin
+      - name: Diagnose short-lived token connectivity (read-only)
+        id: token-diagnostics
+        if: inputs.mode == 'diagnostic'
+        env:
+          KUBECONFIG_PATH: ${{ steps.gke-token.outputs.kubeconfig_path }}
+          AUTH_METHOD: short-lived-access-token
+        run: python3 .github/scripts/diagnose-dev-migration-connectivity.py
+      - uses: google-github-actions/get-gke-credentials@v3
+        id: gke-plugin
+        if: inputs.mode == 'diagnostic'
+        with:
+          project_id: helpdeskcloud-capstone-511905
+          cluster_name: helpdeskcloud-dev-gke
+          location: us-east1
+          use_dns_based_endpoint: true
+          use_auth_provider: true
+      - name: Diagnose GKE auth plugin connectivity (read-only)
+        id: plugin-diagnostics
+        if: inputs.mode == 'diagnostic'
+        env:
+          KUBECONFIG_PATH: ${{ steps.gke-plugin.outputs.kubeconfig_path }}
+          AUTH_METHOD: gke-gcloud-auth-plugin
+        run: python3 .github/scripts/diagnose-dev-migration-connectivity.py
+      - name: Finish diagnostics without entering the migration path
+        if: inputs.mode == 'diagnostic'
+        run: |
+          {
+            echo '## Dev GKE migration connectivity diagnostics'
+            echo
+            echo 'Both read-only credential-method checks completed. Review the sanitized results above. No Kubernetes resources were changed and no migration Job or SQL was executed.'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Recheck target and bootstrap objects with the approved identity
+        if: inputs.mode == 'migration'
         run: |
           set -euo pipefail
           test "$(kubectl config current-context)" = "gke_${PROJECT_ID}_${REGION}_${CLUSTER}"
@@ -135,6 +199,7 @@ jobs:
           kubectl get secretproviderclass helpdesk-dev-db-admin --namespace "$NAMESPACE" >/dev/null
           kubectl get configmap helpdesk-dev-schema-001 --namespace "$NAMESPACE" >/dev/null
       - name: Dry-run and create the Job once; never replace an existing Job
+        if: inputs.mode == 'migration'
         run: |
           set -euo pipefail
           manifest="$RUNNER_TEMP/dev-migration/job.yaml"
