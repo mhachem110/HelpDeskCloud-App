@@ -36,7 +36,7 @@ metadata:
   namespace: helpdesk-dev
 subjects:
   - kind: User
-    name: helpdesk-app-migration-runner-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
+    name: helpdesk-app-migr-runner-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
     apiGroup: rbac.authorization.k8s.io
 roleRef:
   kind: Role

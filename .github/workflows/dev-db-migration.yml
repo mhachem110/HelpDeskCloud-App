@@ -120,7 +120,7 @@ jobs:
         with:
           project_id: helpdeskcloud-capstone-511905
           workload_identity_provider: projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/github-app-migration-dev
-          service_account: helpdesk-app-migration-runner-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
+          service_account: helpdesk-app-migr-runner-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
       - uses: google-github-actions/get-gke-credentials@v3
         with:
           project_id: helpdeskcloud-capstone-511905

@@ -78,6 +78,16 @@ class SupportingDeliveryPolicyTests(unittest.TestCase):
         self.assertNotIn("kubectl delete", migration_script)
         self.assertNotIn("kubectl replace", migration_script)
 
+        auth = next(step for step in steps
+                    if str(step.get("uses", "")).startswith("google-github-actions/auth@"))
+        self.assertEqual(auth["with"]["workload_identity_provider"],
+                         "projects/260283083469/locations/global/workloadIdentityPools/"
+                         "helpdesk-github/providers/github-app-migration-dev")
+        self.assertEqual(auth["with"]["service_account"],
+                         "helpdesk-app-migr-runner-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com")
+        self.assertNotIn("cloudsql", migration_script.lower())
+        self.assertNotIn("secretmanager", migration_script.lower())
+
     def test_migration_runner_rbac_is_namespace_scoped_and_read_limited(self):
         role, binding = list(yaml.safe_load_all(
             (ROOT / "k8s/dev-migration-runner-rbac.yaml").read_text()))
@@ -86,7 +96,7 @@ class SupportingDeliveryPolicyTests(unittest.TestCase):
         self.assertEqual(binding["kind"], "RoleBinding")
         self.assertEqual(binding["metadata"]["namespace"], "helpdesk-dev")
         self.assertEqual(binding["subjects"][0]["name"],
-                         "helpdesk-app-migration-runner-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com")
+                         "helpdesk-app-migr-runner-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com")
         job_rule = next(rule for rule in role["rules"] if "jobs" in rule["resources"])
         self.assertEqual(job_rule["verbs"], ["get", "list", "watch", "create"])
         self.assertNotIn("update", job_rule["verbs"])
