@@ -17,6 +17,10 @@ A modern support-ticket platform built with **ASP.NET Core (.NET 10)**, **Postgr
 - GitHub Actions **credential-free PR CI** (compile, validation tests, Docker build/critical image scan, Helm lint/render)
 - No hardcoded cloud credentials or Terraform state in this repository
 
+## Phase 7 Dev GKE preparation
+
+The chart now has a [Dev-specific deployment guide](docs/GKE-DEPLOYMENT.md) and `helm/helpdesk/values-dev.yaml`. It prepares two internal `ClusterIP` replicas, each with digest-pinned app and Cloud SQL Auth Proxy containers, a read-only managed Secret Manager CSI connection-string file, dedicated app and migration identities, and a separately approved one-time schema Job. Autoscaling is disabled for the initial deployment. The app still uses `ConnectionStrings__Default` for local Docker Compose. Dev image digests are intentionally empty until owner-approved image publication; Helm refuses to render a Dev workload without real digests. No cluster, image, database user, secret payload or workload is created by merging this application PR.
+
 ## Quickest start — Docker Desktop
 
 Requirements: [Docker Desktop](https://docs.docker.com/desktop/) with Linux containers. .NET does not need to be installed if using Docker.
@@ -71,7 +75,8 @@ HelpDeskCloud-App/
 │   └── HelpDeskCloud.csproj
 ├── tests/HelpDeskCloud.Tests/           # dependency-light test executable
 ├── database/init.sql                   # initial PostgreSQL schema for local DB
-├── helm/helpdesk/                       # AKS/GKE-compatible Helm chart
+├── helm/helpdesk/                       # base chart, Dev values and one-time migration SQL
+├── docs/GKE-DEPLOYMENT.md              # approved first-deployment checkpoints
 ├── Dockerfile
 ├── compose.yaml
 ├── .env.example

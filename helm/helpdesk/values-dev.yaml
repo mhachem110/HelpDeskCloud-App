@@ -1,0 +1,70 @@
+# First install with --set application.enabled=false to create identities and CSI objects.
+# Supply real image digests only after the approved images have been published.
+application:
+  enabled: true
+replicaCount: 2
+image:
+  repository: us-east1-docker.pkg.dev/helpdeskcloud-capstone-511905/helpdeskcloud-dev-images/helpdeskcloud
+  digest: ""
+  requireDigest: true
+  pullPolicy: IfNotPresent
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+    ephemeral-storage: 1Gi
+  limits:
+    cpu: 500m
+    memory: 1Gi
+    ephemeral-storage: 2Gi
+database:
+  connectionFile:
+    enabled: true
+    path: /var/secrets/db-connection
+    providerClass: helpdesk-dev-db
+    resourceName: projects/helpdeskcloud-capstone-511905/secrets/helpdesk-dev-db-connection/versions/latest
+cloudSqlProxy:
+  enabled: true
+  image:
+    repository: us-east1-docker.pkg.dev/helpdeskcloud-capstone-511905/helpdeskcloud-dev-images/cloud-sql-proxy
+    digest: ""
+  instanceConnectionName: helpdeskcloud-capstone-511905:us-east1:helpdeskcloud-dev-postgres
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+      ephemeral-storage: 1Gi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+      ephemeral-storage: 2Gi
+serviceAccount:
+  create: true
+  name: helpdesk-dev-app
+  automountServiceAccountToken: true
+  annotations:
+    iam.gke.io/gcp-service-account: helpdesk-app-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
+autoscaling:
+  enabled: false
+migration:
+  enabled: false
+  serviceAccountName: helpdesk-dev-migrate
+  gcpServiceAccount: helpdesk-migrate-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
+  providerClass: helpdesk-dev-db-admin
+  adminSecretResourceName: projects/helpdeskcloud-capstone-511905/secrets/helpdesk-dev-db-admin-password/versions/latest
+  image:
+    repository: us-east1-docker.pkg.dev/helpdeskcloud-capstone-511905/helpdeskcloud-dev-images/postgres-client
+    digest: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+      ephemeral-storage: 1Gi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+      ephemeral-storage: 2Gi

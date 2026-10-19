@@ -25,3 +25,5 @@ Thumbs.db
 *.zip
 *.log
 coverage/
+**/__pycache__/
+*.pyc

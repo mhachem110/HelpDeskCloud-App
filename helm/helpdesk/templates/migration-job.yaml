@@ -1,0 +1,91 @@
+{{- if and .Values.migration.enabled .Values.application.enabled }}
+{{- fail "Render the approved migration Job separately with application.enabled=false" }}
+{{- end }}
+{{- if .Values.migration.enabled }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.cloudSqlProxy.image.digest) }}
+{{- fail "A real immutable Cloud SQL Auth Proxy digest is required for migration" }}
+{{- end }}
+{{- if not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.migration.image.digest) }}
+{{- fail "A real immutable PostgreSQL client digest is required for migration" }}
+{{- end }}
+# Render this Job separately and apply it only after the owner approves migration.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: helpdesk-dev-schema-001
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      serviceAccountName: {{ required "migration KSA required" .Values.migration.serviceAccountName | quote }}
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654
+        runAsGroup: 1654
+        fsGroup: 1654
+        seccompProfile:
+          type: RuntimeDefault
+      # Native sidecars stop when the psql container exits, so the Job can Complete.
+      initContainers:
+        - name: cloud-sql-proxy
+          restartPolicy: Always
+          image: "{{ required "proxy image repository required" .Values.cloudSqlProxy.image.repository }}@{{ .Values.cloudSqlProxy.image.digest }}"
+          args:
+            - --private-ip
+            - --address=127.0.0.1
+            - --port=5432
+            - {{ required "Cloud SQL instance name required" .Values.cloudSqlProxy.instanceConnectionName | quote }}
+          startupProbe:
+            tcpSocket:
+              port: 5432
+            periodSeconds: 5
+            failureThreshold: 30
+          resources:
+            {{- toYaml .Values.cloudSqlProxy.resources | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      containers:
+        - name: migrate
+          image: "{{ required "PostgreSQL client image repository required" .Values.migration.image.repository }}@{{ .Values.migration.image.digest }}"
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              set +x
+              export PGPASSWORD="$(cat /var/secrets/admin-password)"
+              for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+                if pg_isready -h 127.0.0.1 -p 5432 -U postgres -d helpdesk -q; then break; fi
+                sleep 5
+              done
+              psql -h 127.0.0.1 -p 5432 -U postgres -d helpdesk -v ON_ERROR_STOP=1 -1 \
+                -f /schema/001_init.sql -f /schema/002_grants.sql
+          resources:
+            {{- toYaml .Values.migration.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: admin-password
+              mountPath: /var/secrets
+              readOnly: true
+            - name: schema
+              mountPath: /schema
+              readOnly: true
+      volumes:
+        - name: admin-password
+          csi:
+            driver: secrets-store-gke.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ .Values.migration.providerClass | quote }}
+        - name: schema
+          configMap:
+            name: helpdesk-dev-schema-001
+{{- end }}
