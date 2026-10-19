@@ -1,4 +1,4 @@
-{{- if .Values.database.connectionFile.enabled }}
+{{- if and .Values.platformBootstrap.enabled .Values.database.connectionFile.enabled }}
 # Versioned SQL is mounted into a manually dispatched one-time Job.
 apiVersion: v1
 kind: ConfigMap

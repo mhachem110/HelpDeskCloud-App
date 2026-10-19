@@ -1,0 +1,46 @@
+# Owner applies this only after the GKE cluster and dedicated deployer GSA exist.
+# The app release excludes ServiceAccounts, secret mounts and migration SQL.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: helpdesk-dev-delivery
+  namespace: helpdesk-dev
+rules:
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: ['']
+    resources: [services]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: ['']
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: ['']
+    resources: [pods/portforward]
+    verbs: [create]
+  # Helm's default release storage uses Kubernetes Secrets in this namespace.
+  - apiGroups: ['']
+    resources: [secrets]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: ['']
+    resources: [serviceaccounts]
+    resourceNames: [helpdesk-dev-app]
+    verbs: [get]
+  - apiGroups: [secrets-store.csi.x-k8s.io]
+    resources: [secretproviderclasses]
+    resourceNames: [helpdesk-dev-db]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: helpdesk-dev-delivery
+  namespace: helpdesk-dev
+subjects:
+  - kind: User
+    name: helpdesk-app-deployer-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: helpdesk-dev-delivery
+  apiGroup: rbac.authorization.k8s.io

@@ -27,3 +27,6 @@ Thumbs.db
 coverage/
 **/__pycache__/
 *.pyc
+# GitHub OIDC actions create short-lived credentials and kubeconfigs.
+gha-creds-*.json
+gha-kubeconfig-*

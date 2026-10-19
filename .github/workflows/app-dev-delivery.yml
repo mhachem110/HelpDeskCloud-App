@@ -1,0 +1,212 @@
+name: Application Dev delivery
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: application-dev-delivery
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: helpdeskcloud-capstone-511905
+  REGION: us-east1
+  CLUSTER: helpdeskcloud-dev-gke
+  NAMESPACE: helpdesk-dev
+  IMAGE_REPOSITORY: us-east1-docker.pkg.dev/helpdeskcloud-capstone-511905/helpdeskcloud-dev-images/helpdeskcloud
+
+jobs:
+  package:
+    name: Test, build and scan reviewed source
+    if: github.repository == 'mhachem110/HelpDeskCloud-App' && github.ref == 'refs/heads/dev' && vars.DEV_APP_CD_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build and test application
+        run: |
+          set -euo pipefail
+          dotnet restore src/HelpDeskCloud/HelpDeskCloud.csproj
+          dotnet restore tests/HelpDeskCloud.Tests/HelpDeskCloud.Tests.csproj
+          dotnet build src/HelpDeskCloud/HelpDeskCloud.csproj -c Release --no-restore
+          dotnet run --project tests/HelpDeskCloud.Tests/HelpDeskCloud.Tests.csproj -c Release --no-restore
+      - name: Build one Linux image from this commit
+        run: |
+          set -euo pipefail
+          docker build --platform linux/amd64 --tag helpdeskcloud:reviewed .
+          test "$(docker image inspect helpdeskcloud:reviewed --format '{{.Os}}/{{.Architecture}}')" = 'linux/amd64'
+      - name: Block fixable critical image vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: helpdeskcloud:reviewed
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: CRITICAL
+      - name: Save the scanned image for the publisher
+        run: docker save helpdeskcloud:reviewed -o "$RUNNER_TEMP/helpdeskcloud.tar"
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: reviewed-helpdesk-image
+          path: ${{ runner.temp }}/helpdeskcloud.tar
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+
+  publish:
+    name: Approved Dev image publication
+    needs: package
+    if: needs.package.result == 'success'
+    environment: dev-app-publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    outputs:
+      image_digest: ${{ steps.image.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+      - name: Verify protected publishing Environment before OIDC
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_ENVIRONMENT: dev-app-publish
+        run: bash .github/scripts/verify-dev-environment.sh
+      - uses: actions/download-artifact@v4.3.0
+        with:
+          name: reviewed-helpdesk-image
+          path: ${{ runner.temp }}
+      - name: Load the exact scanned image
+        run: docker load -i "$RUNNER_TEMP/helpdeskcloud.tar"
+      # These dedicated app identities do not exist until separately approved.
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: helpdeskcloud-capstone-511905
+          workload_identity_provider: projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/github-app-publish-dev
+          service_account: helpdesk-app-publisher-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Push commit-tagged image and resolve registry digest
+        id: image
+        run: |
+          set -euo pipefail
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          tag="sha-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          image="${IMAGE_REPOSITORY}:${tag}"
+          docker tag helpdeskcloud:reviewed "$image"
+          docker push "$image"
+          digest=$(gcloud artifacts docker images describe "$image" --project="$PROJECT_ID" --format='value(image_summary.digest)')
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo '::error::Registry did not return a valid image digest.'; exit 1; }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Published ${image}@${digest}" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Approved Dev GKE deployment
+    needs: publish
+    if: needs.publish.result == 'success'
+    environment: dev-app-deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+      - name: Verify protected deployment Environment before OIDC
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_ENVIRONMENT: dev-app-deploy
+        run: bash .github/scripts/verify-dev-environment.sh
+      - name: Verify immutable image inputs
+        env:
+          APP_DIGEST: ${{ needs.publish.outputs.image_digest }}
+          PROXY_DIGEST: ${{ vars.DEV_PROXY_IMAGE_DIGEST }}
+        run: |
+          set -euo pipefail
+          [[ "$APP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$PROXY_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo '::error::Approved proxy image digest is missing or invalid.'; exit 1; }
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: helpdeskcloud-capstone-511905
+          workload_identity_provider: projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/github-app-deploy-dev
+          service_account: helpdesk-app-deployer-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
+      - uses: google-github-actions/get-gke-credentials@v3
+        with:
+          project_id: helpdeskcloud-capstone-511905
+          cluster_name: helpdeskcloud-dev-gke
+          location: us-east1
+          use_dns_based_endpoint: true
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
+      - uses: azure/setup-kubectl@v4
+      - name: Verify target and bootstrap resources
+        run: |
+          set -euo pipefail
+          test "$(kubectl config current-context)" = "gke_${PROJECT_ID}_${REGION}_${CLUSTER}"
+          kubectl get serviceaccount helpdesk-dev-app -n "$NAMESPACE" >/dev/null
+          kubectl get secretproviderclass helpdesk-dev-db -n "$NAMESPACE" >/dev/null
+      - name: Render and validate exact digest-pinned release
+        env:
+          APP_DIGEST: ${{ needs.publish.outputs.image_digest }}
+          PROXY_DIGEST: ${{ vars.DEV_PROXY_IMAGE_DIGEST }}
+        run: |
+          set -euo pipefail
+          helm lint helm/helpdesk -f helm/helpdesk/values-dev.yaml -f helm/helpdesk/values-dev-delivery.yaml \
+            --set-string image.digest="$APP_DIGEST" --set-string cloudSqlProxy.image.digest="$PROXY_DIGEST"
+          helm template helpdesk helm/helpdesk -n "$NAMESPACE" -f helm/helpdesk/values-dev.yaml -f helm/helpdesk/values-dev-delivery.yaml \
+            --set-string image.digest="$APP_DIGEST" --set-string cloudSqlProxy.image.digest="$PROXY_DIGEST" \
+            > "$RUNNER_TEMP/helpdesk-release.yaml"
+          kubectl apply --dry-run=server -n "$NAMESPACE" -f "$RUNNER_TEMP/helpdesk-release.yaml" >/dev/null
+      - name: Deploy and wait for two healthy replicas
+        env:
+          APP_DIGEST: ${{ needs.publish.outputs.image_digest }}
+          PROXY_DIGEST: ${{ vars.DEV_PROXY_IMAGE_DIGEST }}
+        run: |
+          set -euo pipefail
+          helm upgrade --install helpdesk helm/helpdesk -n "$NAMESPACE" -f helm/helpdesk/values-dev.yaml -f helm/helpdesk/values-dev-delivery.yaml \
+            --set-string image.digest="$APP_DIGEST" --set-string cloudSqlProxy.image.digest="$PROXY_DIGEST" \
+            --wait --timeout 10m
+          kubectl rollout status deployment/helpdesk-helpdesk -n "$NAMESPACE" --timeout=5m
+          kubectl get deployment helpdesk-helpdesk -n "$NAMESPACE" -o json | jq -e \
+            '.spec.replicas == 2 and .status.readyReplicas == 2 and .status.availableReplicas == 2' >/dev/null
+          kubectl get service helpdesk-helpdesk -n "$NAMESPACE" -o json | jq -e '.spec.type == "ClusterIP"' >/dev/null
+      - name: Smoke test via localhost-only port-forward
+        run: |
+          set -euo pipefail
+          kubectl port-forward --address 127.0.0.1 -n "$NAMESPACE" service/helpdesk-helpdesk 18080:80 > "$RUNNER_TEMP/port-forward.log" 2>&1 &
+          forward_pid=$!
+          trap 'kill "$forward_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl -fsS --max-time 3 http://127.0.0.1:18080/health/live >/dev/null && \
+               curl -fsS --max-time 3 http://127.0.0.1:18080/health/ready >/dev/null; then
+              echo 'Both health endpoints passed through the internal Service.'
+              exit 0
+            fi
+            sleep 2
+          done
+          echo '::error::Application health checks did not pass.'
+          exit 1
+      - name: Record reviewed release
+        env:
+          APP_DIGEST: ${{ needs.publish.outputs.image_digest }}
+        run: |
+          echo "Commit: ${GITHUB_SHA}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Image: ${IMAGE_REPOSITORY}@${APP_DIGEST}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Helm revision: $(helm history helpdesk -n "$NAMESPACE" -o json | jq -r '.[-1].revision')" >> "$GITHUB_STEP_SUMMARY"
+          echo 'Dev Deployment: 2 ready replicas, internal ClusterIP, health checks passed.' >> "$GITHUB_STEP_SUMMARY"

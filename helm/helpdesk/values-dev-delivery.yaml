@@ -1,0 +1,23 @@
+# The CD identity owns only the app Deployment and internal Service.
+# Bootstrap identities, secret mounts and one-time SQL stay owner controlled.
+application:
+  enabled: true
+platformBootstrap:
+  enabled: false
+replicaCount: 2
+autoscaling:
+  enabled: false
+migration:
+  enabled: false
+service:
+  type: ClusterIP
+serviceAccount:
+  create: false
+  name: helpdesk-dev-app
+image:
+  requireDigest: true
+database:
+  connectionFile:
+    enabled: true
+cloudSqlProxy:
+  enabled: true
