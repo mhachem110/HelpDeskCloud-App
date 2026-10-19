@@ -1,6 +1,6 @@
 # First Dev deployment on GKE
 
-**Status:** deployment procedure prepared for review; it has not been executed. The corresponding [infrastructure Phase 7 PR](https://github.com/mhachem110/HelpDeskCloud-Infra) must be merged and its GKE Apply separately approved before these commands are used. The application has no end-user login, so this guide uses a `ClusterIP` Service and localhost-only port-forward. Do not add a public Ingress, LoadBalancer or real customer data.
+**Status:** Phase 7 code is merged, but GKE creation and application deployment have not been verified. The current [infrastructure drift PR](https://github.com/mhachem110/HelpDeskCloud-Infra/pull/13) must be reviewed before any Apply. The application has no end-user login, so this guide uses a `ClusterIP` Service and localhost-only port-forward. Do not add a public Ingress, LoadBalancer or real customer data.
 
 ```text
 Owner's Cloud Shell ──authenticated DNS endpoint──> Dev GKE control plane
@@ -13,7 +13,7 @@ Owner ──localhost kubectl port-forward──> internal HelpDesk Service
 
 ## Checkpoint 1 — review and prerequisites
 
-1. Merge reviewed Infra and App PRs into `dev`. Confirm both CI suites passed. Merging does not deploy GKE or the app.
+1. Confirm the Phase 7 Infra and App PRs are merged into `dev`, their CI suites passed, and the remaining drift was resolved through a separately reviewed correction. Merging does not deploy GKE or the app.
 2. Owner verifies Infra's `docs/PHASE7.md`: seven APIs, IAM prerequisites, quota, budget, network/subnet, reviewed Dev Plan and the 14 additions. The protected `dev-network-apply` workflow requires separate reviewer approval. Do not run Apply from this guide.
 3. After approved Apply, use its read-only verification (or dispatch `verify-only`). Confirm the cluster's actual GKE version supports [native sidecars](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/) for the one-time Job (stable in Kubernetes 1.33), the managed Secret Manager CSI add-on, private nodes and DNS control-plane endpoint.
 4. The human operator needs `container.clusters.get` plus the required Kubernetes namespace/deployment permissions. Terraform and application Pod identities are not human deployment identities. Commands below require owner approval when they create a secret version, database login, image, Job or workload.
@@ -41,14 +41,17 @@ From the merged application `dev` checkout:
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 helm lint helm/helpdesk -f helm/helpdesk/values-dev.yaml \
   --set application.enabled=false
-helm upgrade --install helpdesk helm/helpdesk --namespace "$NAMESPACE" \
+helm template helpdesk helm/helpdesk --namespace "$NAMESPACE" \
   -f helm/helpdesk/values-dev.yaml --set application.enabled=false \
-  --wait --timeout 5m
+  > /tmp/helpdesk-bootstrap.yaml
+# Review the rendered objects; then apply only after owner approval.
+kubectl apply --dry-run=server -n "$NAMESPACE" -f /tmp/helpdesk-bootstrap.yaml
+kubectl apply -n "$NAMESPACE" -f /tmp/helpdesk-bootstrap.yaml
 kubectl get serviceaccounts,secretproviderclasses -n "$NAMESPACE"
 kubectl get serviceaccount helpdesk-dev-app -n "$NAMESPACE" -o yaml
 ```
 
-This bootstrap Helm release installs two annotated Kubernetes ServiceAccounts, two managed CSI `SecretProviderClass` objects and the reviewed SQL ConfigMap. It starts no app or migration Pod and needs no image digest. `helpdesk-dev-app` maps to `helpdesk-app-dev@...`; `helpdesk-dev-migrate` maps to `helpdesk-migrate-dev@...`. Infra IAM grants the app and migration KSAs access to their **own** Secret Manager records. Managed CSI uses direct KSA principals; the Cloud SQL Auth Proxy uses KSA-to-GSA impersonation. [Google's managed CSI guide](https://docs.cloud.google.com/secret-manager/docs/secret-manager-managed-csi-component) describes the driver `secrets-store-gke.csi.k8s.io` and `provider: gke`.
+This owner-controlled bootstrap installs two annotated Kubernetes ServiceAccounts, two managed CSI `SecretProviderClass` objects and the reviewed SQL ConfigMap. It starts no app or migration Pod and needs no image digest. It is intentionally outside the later application Helm release: the Dev delivery identity cannot change these bootstrap resources through Helm. `helpdesk-dev-app` maps to `helpdesk-app-dev@...`; `helpdesk-dev-migrate` maps to `helpdesk-migrate-dev@...`. Infra IAM grants the app and migration KSAs access to their **own** Secret Manager records. Managed CSI uses direct KSA principals; the Cloud SQL Auth Proxy uses KSA-to-GSA impersonation. [Google's managed CSI guide](https://docs.cloud.google.com/secret-manager/docs/secret-manager-managed-csi-component) describes the driver `secrets-store-gke.csi.k8s.io` and `provider: gke`.
 
 ## Checkpoint 3 — restricted PostgreSQL login and secrets
 
@@ -154,16 +157,16 @@ kubectl logs -n "$NAMESPACE" job/helpdesk-dev-schema-001 -c migrate
 The Dev values require real immutable digests. A blank or invalid digest fails Helm rendering. Normal upgrades do **not** run the schema Job because `migration.enabled=false`.
 
 ```sh
-helm lint helm/helpdesk -f helm/helpdesk/values-dev.yaml \
+helm lint helm/helpdesk -f helm/helpdesk/values-dev.yaml -f helm/helpdesk/values-dev-delivery.yaml \
   --set-string image.digest="$APP_DIGEST" --set-string cloudSqlProxy.image.digest="$PROXY_DIGEST"
 helm template helpdesk helm/helpdesk --namespace "$NAMESPACE" \
-  -f helm/helpdesk/values-dev.yaml \
+  -f helm/helpdesk/values-dev.yaml -f helm/helpdesk/values-dev-delivery.yaml \
   --set-string image.digest="$APP_DIGEST" --set-string cloudSqlProxy.image.digest="$PROXY_DIGEST" \
   > /tmp/helpdesk-dev.yaml
 kubectl apply --dry-run=server -n "$NAMESPACE" -f /tmp/helpdesk-dev.yaml
 # Only after owner approval of the manifest and cost:
 helm upgrade --install helpdesk helm/helpdesk --namespace "$NAMESPACE" \
-  -f helm/helpdesk/values-dev.yaml \
+  -f helm/helpdesk/values-dev.yaml -f helm/helpdesk/values-dev-delivery.yaml \
   --set-string image.digest="$APP_DIGEST" --set-string cloudSqlProxy.image.digest="$PROXY_DIGEST" \
   --wait --timeout 10m
 helm status helpdesk -n "$NAMESPACE"

@@ -1,6 +1,9 @@
 replicaCount: 2
 application:
   enabled: true
+# Bootstrap objects are installed separately by the owner before app delivery.
+platformBootstrap:
+  enabled: true
 image:
   repository: "" # Set to Artifact Registry path during deployment
   tag: "1.0.0"

@@ -105,6 +105,15 @@ class GkeManifestTests(unittest.TestCase):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 render(*options)
 
+    def test_delivery_release_cannot_change_bootstrap_identities_or_sql(self):
+        manifests = render("-f", str(CHART / "values-dev-delivery.yaml"))
+        self.assertEqual({item["kind"] for item in manifests}, {"Deployment", "Service"})
+        deployment = one(manifests, "Deployment")
+        self.assertEqual(deployment["spec"]["replicas"], 2)
+        self.assertEqual(deployment["spec"]["template"]["spec"]["serviceAccountName"],
+                         "helpdesk-dev-app")
+        self.assertEqual(one(manifests, "Service")["spec"]["type"], "ClusterIP")
+
 
 if __name__ == "__main__":
     unittest.main()

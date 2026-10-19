@@ -15,6 +15,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  promotion-route:
+    name: Check promotion route
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require reviewed branch progression
+        env:
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.head_ref }}
+        run: |
+          case "${BASE}:${HEAD}" in
+            dev:feature/*|stage:dev|prod:stage) echo 'Promotion route accepted.' ;;
+            *) echo '::error::Only feature/* → dev → stage → prod is allowed.'; exit 1 ;;
+          esac
+
   validate:
     name: Build and validate .NET
     runs-on: ubuntu-latest
@@ -53,6 +68,15 @@ jobs:
           ignore-unfixed: true
           vuln-type: 'os,library'
           severity: CRITICAL
+      - name: Scan repository for committed secrets
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          format: table
+          exit-code: '1'
+          severity: HIGH,CRITICAL
 
   helm:
     name: Validate Helm chart
@@ -85,5 +109,9 @@ jobs:
             --set application.enabled=false --set migration.enabled=true \
             --set cloudSqlProxy.image.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
             --set migration.image.digest=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc > /tmp/helpdesk-migration.yaml
-          "$(go env GOPATH)/bin/kubeconform" -strict -summary -ignore-missing-schemas -kubernetes-version 1.33.0 /tmp/helpdesk-dev.yaml /tmp/helpdesk-migration.yaml
-          python -m unittest discover -s tests -p 'test_gke_manifests.py' -v
+          helm template helpdesk helm/helpdesk -n helpdesk-dev -f helm/helpdesk/values-dev.yaml \
+            -f helm/helpdesk/values-dev-delivery.yaml \
+            --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+            --set cloudSqlProxy.image.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb > /tmp/helpdesk-release.yaml
+          "$(go env GOPATH)/bin/kubeconform" -strict -summary -ignore-missing-schemas -kubernetes-version 1.33.0 /tmp/helpdesk-dev.yaml /tmp/helpdesk-migration.yaml /tmp/helpdesk-release.yaml k8s/dev-delivery-rbac.yaml
+          python -m unittest discover -s tests -p 'test_*.py' -v
