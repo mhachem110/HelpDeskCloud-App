@@ -2,7 +2,7 @@
 # Supply real image digests only after the approved images have been published.
 application:
   enabled: true
-replicaCount: 1
+replicaCount: 2
 image:
   repository: us-east1-docker.pkg.dev/helpdeskcloud-capstone-511905/helpdeskcloud-dev-images/helpdeskcloud
   digest: ""

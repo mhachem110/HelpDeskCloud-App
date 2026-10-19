@@ -171,7 +171,7 @@ kubectl rollout status deployment/helpdesk-helpdesk -n "$NAMESPACE" --timeout=5m
 kubectl get pods,service -n "$NAMESPACE" -o wide
 ```
 
-Confirm the Deployment has one replica, two containers, digest images, a read-only CSI mount, the intended KSA, `/health/live` and `/health/ready` probes, and a `ClusterIP` Service. Confirm the proxy uses `--private-ip` and the existing instance connection name; inspect its logs without dumping environment variables. Confirm node image pulls use the node SA's repository Reader permission. The GKE API verifier cannot prove actual Pod-to-SQL connectivity; `/health/ready` and ticket operations do.
+Confirm the Deployment has two replicas, each with the application and its own Cloud SQL Auth Proxy sidecar, digest-pinned images, a read-only CSI mount, the intended KSA, `/health/live` and `/health/ready` probes, and a `ClusterIP` Service. Autoscaling remains disabled for this initial deployment. Confirm each proxy uses `--private-ip` and the existing instance connection name; inspect logs without dumping environment variables. Confirm node image pulls use the node SA's repository Reader permission. The GKE API verifier cannot prove actual Pod-to-SQL connectivity; `/health/ready` and ticket operations do.
 
 For a localhost-only owner demonstration, use a shell on the **owner's computer** that has authorized `kubectl` access (Cloud Shell port-forward only exposes its own localhost):
 

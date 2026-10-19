@@ -45,7 +45,9 @@ class GkeManifestTests(unittest.TestCase):
         deployment = one(manifests, "Deployment")
         pod = deployment["spec"]["template"]["spec"]
         self.assertEqual(pod["serviceAccountName"], "helpdesk-dev-app")
-        self.assertEqual(deployment["spec"]["replicas"], 1)
+        self.assertEqual(deployment["spec"]["replicas"], 2)
+        self.assertEqual([container["name"] for container in deployment["spec"]["template"]["spec"]["containers"]],
+                         ["helpdesk", "cloud-sql-proxy"])
         self.assertEqual({container["name"] for container in pod["containers"]},
                          {"helpdesk", "cloud-sql-proxy"})
         for container in pod["containers"]:
