@@ -5,17 +5,21 @@ set -euo pipefail
 # the exact repository, branch, required reviewers, and sole allowed branch
 # before any job requests a Google Cloud OIDC token.
 if [[ "${GITHUB_REPOSITORY:-}" != 'mhachem110/HelpDeskCloud-App' || "${GITHUB_REF:-}" != 'refs/heads/dev' ]]; then
-  echo '::error::Application delivery is limited to the trusted Dev branch.'
+  echo '::error::Protected Dev actions are limited to the trusted Dev branch.'
   exit 1
 fi
 if [[ "${GITHUB_EVENT_NAME:-}" != 'push' && "${GITHUB_EVENT_NAME:-}" != 'workflow_dispatch' ]]; then
-  echo '::error::Application delivery cannot run from a pull request.'
+  echo '::error::Protected Dev actions cannot run from a pull request.'
   exit 1
 fi
-if [[ -z "${GH_TOKEN:-}" || "${EXPECTED_ENVIRONMENT:-}" != 'dev-app-publish' && "${EXPECTED_ENVIRONMENT:-}" != 'dev-app-deploy' ]]; then
-  echo '::error::Missing GitHub token or unexpected deployment Environment.'
+if [[ -z "${GH_TOKEN:-}" ]]; then
+  echo '::error::Missing GitHub token.'
   exit 1
 fi
+case "${EXPECTED_ENVIRONMENT:-}" in
+  dev-app-publish|dev-app-deploy|dev-supporting-images-publish|dev-db-migration) ;;
+  *) echo '::error::Unexpected deployment Environment.'; exit 1 ;;
+esac
 
 environment_file="${RUNNER_TEMP}/dev-app-environment.json"
 branches_file="${RUNNER_TEMP}/dev-app-branches.json"

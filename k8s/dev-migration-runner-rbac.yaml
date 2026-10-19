@@ -1,0 +1,44 @@
+# Owner applies this after reviewing the dedicated GitHub migration-runner identity.
+# Job creation is namespace-scoped because Kubernetes RBAC cannot restrict create by object name;
+# the protected dev-db-migration Environment and fixed reviewed workflow provide the additional gate.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: helpdesk-dev-migration-runner
+  namespace: helpdesk-dev
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create]
+  - apiGroups: ['']
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: ['']
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: ['']
+    resources: [serviceaccounts]
+    resourceNames: [helpdesk-dev-migrate]
+    verbs: [get]
+  - apiGroups: [secrets-store.csi.x-k8s.io]
+    resources: [secretproviderclasses]
+    resourceNames: [helpdesk-dev-db-admin]
+    verbs: [get]
+  - apiGroups: ['']
+    resources: [configmaps]
+    resourceNames: [helpdesk-dev-schema-001]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: helpdesk-dev-migration-runner
+  namespace: helpdesk-dev
+subjects:
+  - kind: User
+    name: helpdesk-app-migration-runner-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: helpdesk-dev-migration-runner
+  apiGroup: rbac.authorization.k8s.io

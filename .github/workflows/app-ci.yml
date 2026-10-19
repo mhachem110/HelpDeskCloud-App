@@ -113,5 +113,5 @@ jobs:
             -f helm/helpdesk/values-dev-delivery.yaml \
             --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
             --set cloudSqlProxy.image.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb > /tmp/helpdesk-release.yaml
-          "$(go env GOPATH)/bin/kubeconform" -strict -summary -ignore-missing-schemas -kubernetes-version 1.33.0 /tmp/helpdesk-dev.yaml /tmp/helpdesk-migration.yaml /tmp/helpdesk-release.yaml k8s/dev-delivery-rbac.yaml
+          "$(go env GOPATH)/bin/kubeconform" -strict -summary -ignore-missing-schemas -kubernetes-version 1.33.0 /tmp/helpdesk-dev.yaml /tmp/helpdesk-migration.yaml /tmp/helpdesk-release.yaml k8s/dev-delivery-rbac.yaml k8s/dev-migration-runner-rbac.yaml
           python -m unittest discover -s tests -p 'test_*.py' -v
