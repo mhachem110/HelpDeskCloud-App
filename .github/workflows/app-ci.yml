@@ -68,7 +68,7 @@ jobs:
       - name: Set up Go for Kubernetes schema validation
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25.x'
+          go-version: '1.26.x'
       - name: Install pinned Kubeconform
         run: go install github.com/yannh/kubeconform/cmd/kubeconform@v0.8.0
       - name: Install YAML parser for manifest tests
