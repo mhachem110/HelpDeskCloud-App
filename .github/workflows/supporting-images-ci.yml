@@ -1,0 +1,247 @@
+name: Supporting images CI and gated publication
+
+on:
+  pull_request:
+    branches: [dev]
+  push:
+    branches: [dev]
+  workflow_dispatch:
+    inputs:
+      approve_publication:
+        description: Confirm publication after reviewing the scan and the protected Environment approval.
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supporting-images-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: helpdeskcloud-capstone-511905
+  REGION: us-east1
+  IMAGE_REPOSITORY: us-east1-docker.pkg.dev/helpdeskcloud-capstone-511905/helpdeskcloud-dev-images
+  PROXY_SOURCE_IMAGE: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.26.2@sha256:e8c76356fb586300c63f0d29c8c75cfeeba33c29736f9d4afa2df2d78cd0fa19
+  PROXY_IMAGE: cloud-sql-proxy
+  MIGRATION_IMAGE: postgres-client
+
+jobs:
+  validate:
+    name: Build, verify architecture and scan both supporting images
+    if: github.repository == 'mhachem110/HelpDeskCloud-App' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/dev')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out reviewed source
+        uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Pull and verify the pinned Cloud SQL Auth Proxy
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/amd64 "$PROXY_SOURCE_IMAGE"
+          docker tag "$PROXY_SOURCE_IMAGE" cloud-sql-proxy:reviewed
+          test "$(docker image inspect cloud-sql-proxy:reviewed --format '{{.Os}}/{{.Architecture}}')" = 'linux/amd64'
+          version=$(docker run --rm --platform linux/amd64 --entrypoint /cloud-sql-proxy cloud-sql-proxy:reviewed --version)
+          [[ "$version" == 'cloud-sql-proxy version 2.26.2+container' ]]
+          echo "Verified pinned proxy image: ${PROXY_SOURCE_IMAGE}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Scan Cloud SQL Auth Proxy for fixable critical vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: cloud-sql-proxy:reviewed
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: CRITICAL
+
+      - name: Build the pinned PostgreSQL migration client
+        run: docker build --pull --platform linux/amd64 --file database/migration-client/Dockerfile --tag postgres-client:reviewed .
+
+      - name: Verify PostgreSQL client architecture, package and commands
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect postgres-client:reviewed --format '{{.Os}}/{{.Architecture}}')" = 'linux/amd64'
+          docker run --rm --platform linux/amd64 --entrypoint sh postgres-client:reviewed -ec '
+            test "$(id -u)" = 1654
+            command -v psql
+            command -v pg_isready
+            psql --version | grep -F "PostgreSQL) 17.11"
+            pg_isready --version | grep -F "PostgreSQL) 17.11"
+          '
+
+      - name: Scan PostgreSQL migration client for fixable critical vulnerabilities
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: postgres-client:reviewed
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: CRITICAL
+
+      - name: Save the exact scanned images for the approved publisher
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/supporting-images"
+          docker save --output "$RUNNER_TEMP/supporting-images/cloud-sql-proxy.tar" cloud-sql-proxy:reviewed
+          docker save --output "$RUNNER_TEMP/supporting-images/postgres-client.tar" postgres-client:reviewed
+
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: reviewed-supporting-images-${{ github.run_id }}
+          path: ${{ runner.temp }}/supporting-images/*.tar
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+
+  attest:
+    name: Attest and verify supporting-image build provenance
+    needs: validate
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Download the exact scanned image archives
+        uses: actions/download-artifact@v4.3.0
+        with:
+          name: reviewed-supporting-images-${{ github.run_id }}
+          path: ${{ runner.temp }}/supporting-images
+
+      - name: Create signed SLSA build provenance for the archives
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            ${{ runner.temp }}/supporting-images/cloud-sql-proxy.tar
+            ${{ runner.temp }}/supporting-images/postgres-client.tar
+
+      - name: Verify provenance against this repository, workflow and commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SIGNER: mhachem110/HelpDeskCloud-App/.github/workflows/supporting-images-ci.yml
+        run: |
+          set -euo pipefail
+          for subject in \
+            "$RUNNER_TEMP/supporting-images/cloud-sql-proxy.tar" \
+            "$RUNNER_TEMP/supporting-images/postgres-client.tar"; do
+            gh attestation verify "$subject" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$EXPECTED_SIGNER" \
+              --source-ref "$GITHUB_REF" \
+              --source-digest "$GITHUB_SHA" \
+              --deny-self-hosted-runners
+          done
+          echo 'Both scanned image archives have verified GitHub SLSA provenance.' >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Separately approved supporting-image publication
+    needs: [validate, attest]
+    if: github.repository == 'mhachem110/HelpDeskCloud-App' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/dev' && vars.DEV_SUPPORTING_IMAGES_PUBLISH_ENABLED == 'true' && inputs.approve_publication == true
+    environment: dev-supporting-images-publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      actions: read
+      attestations: read
+      contents: read
+      id-token: write
+    outputs:
+      proxy_digest: ${{ steps.publish.outputs.proxy_digest }}
+      migration_digest: ${{ steps.publish.outputs.migration_digest }}
+    steps:
+      - name: Check out the protected Environment verifier
+        uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Verify protected publication Environment before OIDC
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_ENVIRONMENT: dev-supporting-images-publish
+        run: bash .github/scripts/verify-dev-environment.sh
+
+      - name: Download the exact scanned image archives
+        uses: actions/download-artifact@v4.3.0
+        with:
+          name: reviewed-supporting-images-${{ github.run_id }}
+          path: ${{ runner.temp }}/supporting-images
+
+      - name: Re-verify both image archive attestations before cloud authentication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SIGNER: mhachem110/HelpDeskCloud-App/.github/workflows/supporting-images-ci.yml
+        run: |
+          set -euo pipefail
+          for subject in \
+            "$RUNNER_TEMP/supporting-images/cloud-sql-proxy.tar" \
+            "$RUNNER_TEMP/supporting-images/postgres-client.tar"; do
+            gh attestation verify "$subject" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$EXPECTED_SIGNER" \
+              --source-ref refs/heads/dev \
+              --source-digest "$GITHUB_SHA" \
+              --deny-self-hosted-runners
+          done
+
+      - name: Load the exact scanned images and check architecture
+        run: |
+          set -euo pipefail
+          docker load --input "$RUNNER_TEMP/supporting-images/cloud-sql-proxy.tar"
+          docker load --input "$RUNNER_TEMP/supporting-images/postgres-client.tar"
+          test "$(docker image inspect cloud-sql-proxy:reviewed --format '{{.Os}}/{{.Architecture}}')" = 'linux/amd64'
+          test "$(docker image inspect postgres-client:reviewed --format '{{.Os}}/{{.Architecture}}')" = 'linux/amd64'
+
+      - name: Authenticate with the dedicated supporting-image WIF identity
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: helpdeskcloud-capstone-511905
+          workload_identity_provider: projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/github-app-support-images-dev
+          service_account: helpdesk-app-support-image-publisher-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Verify immutable repository and publish unique, non-overwriting tags
+        id: publish
+        run: |
+          set -euo pipefail
+          immutable=$(gcloud artifacts repositories describe helpdeskcloud-dev-images \
+            --location="$REGION" --project="$PROJECT_ID" --format='value(dockerConfig.immutableTags)')
+          [[ "${immutable,,}" == 'true' ]] || { echo '::error::Artifact Registry must enforce immutable Docker tags.'; exit 1; }
+
+          tag="sha-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          proxy_image="${IMAGE_REPOSITORY}/${PROXY_IMAGE}:${tag}"
+          migration_image="${IMAGE_REPOSITORY}/${MIGRATION_IMAGE}:${tag}"
+
+          # Check both destinations before the first push; repository tag immutability is the final race-safe guard.
+          for image in "$proxy_image" "$migration_image"; do
+            if gcloud artifacts docker images describe "$image" --project="$PROJECT_ID" >/dev/null 2>&1; then
+              echo "::error::Refusing to reuse existing immutable tag ${image}."
+              exit 1
+            fi
+          done
+
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker tag cloud-sql-proxy:reviewed "$proxy_image"
+          docker tag postgres-client:reviewed "$migration_image"
+          docker push "$proxy_image"
+          proxy_digest=$(gcloud artifacts docker images describe "$proxy_image" --project="$PROJECT_ID" --format='value(image_summary.digest)')
+          [[ "$proxy_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo '::error::Artifact Registry returned an invalid proxy digest.'; exit 1; }
+          echo "proxy_digest=$proxy_digest" >> "$GITHUB_OUTPUT"
+          echo "Proxy: ${proxy_image}@${proxy_digest}" >> "$GITHUB_STEP_SUMMARY"
+
+          docker push "$migration_image"
+          migration_digest=$(gcloud artifacts docker images describe "$migration_image" --project="$PROJECT_ID" --format='value(image_summary.digest)')
+          [[ "$migration_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo '::error::Artifact Registry returned an invalid migration-client digest.'; exit 1; }
+          echo "migration_digest=$migration_digest" >> "$GITHUB_OUTPUT"
+          echo "Migration client: ${migration_image}@${migration_digest}" >> "$GITHUB_STEP_SUMMARY"
+          echo 'Copy these reviewed digests into DEV_PROXY_IMAGE_DIGEST and DEV_MIGRATION_IMAGE_DIGEST only after reviewing this run.' >> "$GITHUB_STEP_SUMMARY"

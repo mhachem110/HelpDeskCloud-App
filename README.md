@@ -13,20 +13,20 @@ A modern support-ticket platform built with **ASP.NET Core (.NET 10)**, **Postgr
 - `/health/live` and `/health/ready` for Kubernetes probes
 - Rate limiting, basic browser security headers, non-root runtime image
 - Local `docker compose up` development environment (app + PostgreSQL)
-- Helm Deployment, ClusterIP Service, ServiceAccount, optional HPA
-- GitHub Actions **credential-free PR CI** (compile, tests, Docker build/scan, secret scan, Helm lint/render)
-- Prepared Dev delivery workflow with separate approvals for image publication and GKE deployment; disabled until owner-approved identities and live prerequisites exist
+- GitHub Actions CI for .NET, Docker, Helm and digest-pinned supporting images
+- Manually dispatched, separately Environment-approved workflows prepared for supporting-image publication and the one-time Dev database migration
+- Existing Dev application delivery workflow remains disabled until its WIF, Environment, RBAC and repository-variable prerequisites are reviewed
 - No hardcoded cloud credentials or Terraform state in this repository
 
-## Phase 7 Dev GKE preparation
+## Dev GKE and Phase 8
 
-The chart now has a [Dev-specific deployment guide](docs/GKE-DEPLOYMENT.md) and `helm/helpdesk/values-dev.yaml`. It prepares two internal `ClusterIP` replicas, each with digest-pinned app and Cloud SQL Auth Proxy containers, a read-only managed Secret Manager CSI connection-string file, dedicated app and migration identities, and a separately approved one-time schema Job. Autoscaling is disabled for the initial deployment. The app still uses `ConnectionStrings__Default` for local Docker Compose. Dev image digests are intentionally empty until owner-approved image publication; Helm refuses to render a Dev workload without real digests. No cluster, image, database user, secret payload or workload is created by merging this application PR.
+The owner reports Terraform, the Dev GKE cluster, namespace bootstrap, restricted application login and Secret Manager versions are deployed. The supporting images remain unpublished, the one-time schema migration has not run, and application delivery remains disabled. The chart prepares two internal `ClusterIP` replicas, digest-pinned application and Cloud SQL Auth Proxy containers, and a separate migration Job. See the [Dev deployment guide](docs/GKE-DEPLOYMENT.md) and [Phase 8 activation checklist](docs/PHASE8.md). This App PR does not query or mutate cloud resources, read secret payloads, run a migration, publish images or expose the app publicly.
 
 ## Quickest start — Docker Desktop
 
 Requirements: [Docker Desktop](https://docs.docker.com/desktop/) with Linux containers. .NET does not need to be installed if using Docker.
 
-1. Clone the `dev` branch of `mhachem110/HelpDeskCloud-App`.
+1. Clone `mhachem110/HelpDeskCloud-App` and create a feature branch from `dev` for changes. For local use, switch to `dev` or a reviewed feature branch.
 2. In the project root, create your private `.env` file:
 
    ```powershell
@@ -66,9 +66,11 @@ Requirements: [Docker Desktop](https://docs.docker.com/desktop/) with Linux cont
 
 ```text
 HelpDeskCloud-App/
-├── .github/workflows/app-ci.yml        # credential-free PR validation
-├── .github/workflows/app-dev-delivery.yml # gated Dev image publication and GKE rollout
-├── .github/scripts/verify-dev-environment.sh # fail-closed Environment policy check
+├── .github/workflows/app-ci.yml                # credential-free application CI
+├── .github/workflows/supporting-images-ci.yml  # image scan, provenance and gated publish
+├── .github/workflows/dev-db-migration.yml      # separate approved one-time schema migration
+├── .github/workflows/app-dev-delivery.yml      # existing protected Dev application delivery
+├── .github/scripts/verify-dev-environment.sh  # fail-closed Environment policy check
 ├── src/HelpDeskCloud/
 │   ├── Program.cs                       # minimal API routes and middleware
 │   ├── Data/                            # PostgreSQL repository and readiness probe
@@ -77,12 +79,14 @@ HelpDeskCloud-App/
 │   ├── wwwroot/                         # accessible HTML/CSS/JS dashboard
 │   └── HelpDeskCloud.csproj
 ├── tests/HelpDeskCloud.Tests/           # dependency-light test executable
-├── database/init.sql                   # initial PostgreSQL schema for local DB
+├── database/init.sql                         # initial PostgreSQL schema for local DB
+├── database/migration-client/Dockerfile     # pinned PostgreSQL 17.11 migration client
 ├── helm/helpdesk/                       # base chart, Dev values, delivery overlay and one-time migration SQL
 ├── docs/GKE-DEPLOYMENT.md              # approved first-deployment checkpoints
 ├── docs/PHASE8.md                      # identity and delivery activation plan
 ├── docs/FINAL-PROJECT-DEMO.md          # evidence-driven capstone walkthrough
-├── k8s/dev-delivery-rbac.yaml          # proposed namespace-only release access
+├── k8s/dev-delivery-rbac.yaml                # namespace-scoped application delivery access
+├── k8s/dev-migration-runner-rbac.yaml        # separate namespace-scoped migration access
 ├── Dockerfile
 ├── compose.yaml
 ├── .env.example
@@ -143,38 +147,26 @@ This repo uses the agreed branch flow:
 feature/* --PR--> dev --PR--> stage --PR--> prod
 ```
 
-`dev`, `stage`, and `prod` are protected. A normal PR **only validates** changes; CI has no GCP credential. The [Dev delivery workflow](docs/PHASE8.md) is prepared for approved merges to `dev` but is disabled until a separate application OIDC setup, protected GitHub Environments and live GKE/database prerequisites are reviewed. It builds and scans one image, publishes its immutable digest through a dedicated publisher, then uses a separate deployment identity and approval to release that digest. Stage/Prod cloud deployment is not configured.
+`dev`, `stage`, and `prod` are protected. Pull requests run credential-free Application CI and, for `dev`, supporting-image build, architecture, command and Trivy checks. Trusted pushes to `dev` also create and verify GitHub SLSA provenance for the exact supporting-image archives. These jobs do not authenticate to Google Cloud or publish images.
 
-GitHub Actions should later require the names of real completed checks before merging. You can currently find the PR workflow in `.github/workflows/app-ci.yml`.
+Supporting-image publication is manual-only, disabled until `DEV_SUPPORTING_IMAGES_PUBLISH_ENABLED=true`, and waits for the separately protected `dev-supporting-images-publish` Environment. It uses a dedicated WIF provider and repository-scoped Artifact Registry Writer grant. The one-time database migration has its own manual workflow, typed confirmation, `DEV_DB_MIGRATION_ENABLED` gate, WIF identity, namespace RBAC and `dev-db-migration` approval. The existing `app-dev-delivery.yml` keeps its separate `dev-app-publish` and `dev-app-deploy` gates; `DEV_APP_CD_ENABLED` stays unset until prerequisites and the migration are reviewed. See [Phase 8](docs/PHASE8.md) and [GKE deployment](docs/GKE-DEPLOYMENT.md) for the exact IAM, Environment, RBAC and repository-variable checklist.
 
-## GKE deployment chart (prepared; not deployed)
+Stage and Production cloud resources, image repositories, identities and delivery workflows are out of scope. The Helm chart exposes only **ClusterIP**; do not add public ingress without approved authentication and HTTPS.
 
-The Helm chart assumes:
+## GKE deployment chart (prepared; rollout gated)
 
-1. Artifact Registry is provisioned and GKE can pull the image.
-2. Cloud SQL PostgreSQL is available and its schema has been applied using a restricted, controlled migration process.
-3. In Dev, the pre-existing `helpdesk-dev-db-connection` Secret Manager version is mounted as a read-only file by managed CSI. The bootstrap creates its `SecretProviderClass` separately from the app Helm release. Local Compose still uses `ConnectionStrings__Default`. Never put the database password into Git, Helm values, or CLI history.
-4. An authenticated HTTPS ingress/IAP or equivalent is configured **before** internet exposure.
-
-Example render (safe; does not deploy):
-
-```bash
-helm lint helm/helpdesk --set image.repository=example.invalid/helpdesk
-helm template helpdesk helm/helpdesk --set image.repository=example.invalid/helpdesk --set image.tag=1.0.0
-```
-
-Do **not** deploy to GKE with the placeholder image or missing database Secret. These will be supplied by the Terraform/CI-CD phases.
+The Dev chart uses digest-pinned app, proxy and migration-client images. Bootstrap resources and secrets stay outside the regular app release. The one-time migration runs only through its separately approved workflow; application upgrades keep migration disabled and the Service internal. Do not deploy with missing digests or bootstrap prerequisites. Public access remains out of scope until authentication and HTTPS are approved.
 
 ## GCP security decisions
 
-- Cloud CI/CD identity: proposed separate publisher/deployer OIDC identities, pending owner approval
-- Runtime identity: GKE Workload Identity Federation in merged Phase 7 Terraform; live deployment pending
-- Secrets: Google Secret Manager metadata in Phase 7 Terraform; payloads and mounts pending approval
-- Database: private Cloud SQL for PostgreSQL exists; restricted user and schema pending approval
+- Cloud CI/CD uses separate GitHub OIDC Workload Identity Federation providers and service accounts, not service-account keys
+- Supporting-image publication, the one-time migration and app deployment use distinct Environment approvals
+- Runtime identity: GKE Workload Identity Federation with scoped Cloud SQL and secret access
+- Secrets: Google Secret Manager and restricted CSI delivery to pods
+- Database: private Cloud SQL for PostgreSQL
 - Authorization: identity-aware ingress / login and least-privilege authorization (**required before public release**)
-- Networking: Dev VPC and private database path exist; GKE and any authenticated HTTPS entry remain pending
-- Monitoring: use existing GKE/Cloud SQL Logging and Monitoring after rollout; no alert policy claimed yet
-- The Helm chart intentionally exposes only **ClusterIP**, not a publicly reachable LoadBalancer.
+- Monitoring: use existing GKE/Cloud SQL Logging and Monitoring after rollout; no alert policy is claimed yet
+- The Helm chart exposes only **ClusterIP**, not a publicly reachable LoadBalancer
 
 ## Operational cautions
 

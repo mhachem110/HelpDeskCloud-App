@@ -1,0 +1,158 @@
+name: Approved Dev database migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type RUN helpdesk-dev-schema-001 only after reviewing the SQL and migration plan.
+        required: true
+        type: string
+        default: DO NOT RUN
+
+permissions:
+  contents: read
+
+concurrency:
+  group: helpdesk-dev-schema-001
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: helpdeskcloud-capstone-511905
+  REGION: us-east1
+  CLUSTER: helpdeskcloud-dev-gke
+  NAMESPACE: helpdesk-dev
+  PROXY_IMAGE: us-east1-docker.pkg.dev/helpdeskcloud-capstone-511905/helpdeskcloud-dev-images/cloud-sql-proxy
+  MIGRATION_IMAGE: us-east1-docker.pkg.dev/helpdeskcloud-capstone-511905/helpdeskcloud-dev-images/postgres-client
+  JOB_NAME: helpdesk-dev-schema-001
+
+jobs:
+  preflight:
+    name: Require the disabled-by-default migration gate and explicit confirmation
+    if: github.repository == 'mhachem110/HelpDeskCloud-App'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reject unapproved refs and dispatches
+        env:
+          ENABLED: ${{ vars.DEV_DB_MIGRATION_ENABLED }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == 'refs/heads/dev' ]] || { echo '::error::Database migration is limited to the protected dev branch.'; exit 1; }
+          [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]] || { echo '::error::Database migration is manual-only.'; exit 1; }
+          [[ "$ENABLED" == 'true' ]] || { echo '::error::Set DEV_DB_MIGRATION_ENABLED=true only after reviewing all prerequisites.'; exit 1; }
+          [[ "$CONFIRMATION" == 'RUN helpdesk-dev-schema-001' ]] || { echo '::error::Type the exact migration confirmation to continue.'; exit 1; }
+
+  render:
+    name: Lint and render the one-time Job without cloud credentials
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
+      - name: Check approved image digest inputs
+        env:
+          PROXY_DIGEST: ${{ vars.DEV_PROXY_IMAGE_DIGEST }}
+          CLIENT_DIGEST: ${{ vars.DEV_MIGRATION_IMAGE_DIGEST }}
+        run: |
+          set -euo pipefail
+          [[ "$PROXY_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo '::error::DEV_PROXY_IMAGE_DIGEST is missing or invalid.'; exit 1; }
+          [[ "$CLIENT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo '::error::DEV_MIGRATION_IMAGE_DIGEST is missing or invalid.'; exit 1; }
+      - name: Lint and render only the reviewed migration Job
+        env:
+          PROXY_DIGEST: ${{ vars.DEV_PROXY_IMAGE_DIGEST }}
+          CLIENT_DIGEST: ${{ vars.DEV_MIGRATION_IMAGE_DIGEST }}
+        run: |
+          set -euo pipefail
+          helm lint helm/helpdesk -f helm/helpdesk/values-dev.yaml \
+            --set application.enabled=false --set migration.enabled=true \
+            --set-string cloudSqlProxy.image.digest="$PROXY_DIGEST" \
+            --set-string migration.image.digest="$CLIENT_DIGEST"
+          mkdir -p "$RUNNER_TEMP/dev-migration"
+          helm template helpdesk helm/helpdesk --namespace "$NAMESPACE" \
+            -f helm/helpdesk/values-dev.yaml \
+            --set application.enabled=false --set migration.enabled=true \
+            --set-string cloudSqlProxy.image.digest="$PROXY_DIGEST" \
+            --set-string migration.image.digest="$CLIENT_DIGEST" \
+            --show-only templates/migration-job.yaml \
+            > "$RUNNER_TEMP/dev-migration/job.yaml"
+          grep -Fq "${PROXY_IMAGE}@${PROXY_DIGEST}" "$RUNNER_TEMP/dev-migration/job.yaml"
+          grep -Fq "${MIGRATION_IMAGE}@${CLIENT_DIGEST}" "$RUNNER_TEMP/dev-migration/job.yaml"
+          grep -Fq 'helpdesk-dev-schema-001' "$RUNNER_TEMP/dev-migration/job.yaml"
+          grep -Fq 'helpdesk-dev-migrate' "$RUNNER_TEMP/dev-migration/job.yaml"
+      - uses: actions/upload-artifact@v4.6.2
+        with:
+          name: approved-dev-migration-manifest-${{ github.run_id }}
+          path: ${{ runner.temp }}/dev-migration/job.yaml
+          retention-days: 1
+          if-no-files-found: error
+
+  execute:
+    name: Separately approved one-time schema migration
+    needs: render
+    environment: dev-db-migration
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out the protected Environment verifier
+        uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4.3.0
+        with:
+          name: approved-dev-migration-manifest-${{ github.run_id }}
+          path: ${{ runner.temp }}/dev-migration
+      - name: Verify the required GitHub Environment before OIDC
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_ENVIRONMENT: dev-db-migration
+        run: bash .github/scripts/verify-dev-environment.sh
+
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: helpdeskcloud-capstone-511905
+          workload_identity_provider: projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/github-app-migration-dev
+          service_account: helpdesk-app-migration-runner-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
+      - uses: google-github-actions/get-gke-credentials@v3
+        with:
+          project_id: helpdeskcloud-capstone-511905
+          cluster_name: helpdeskcloud-dev-gke
+          location: us-east1
+          use_dns_based_endpoint: true
+      - name: Recheck target and bootstrap objects with the approved identity
+        run: |
+          set -euo pipefail
+          test "$(kubectl config current-context)" = "gke_${PROJECT_ID}_${REGION}_${CLUSTER}"
+          kubectl get serviceaccount helpdesk-dev-migrate --namespace "$NAMESPACE" >/dev/null
+          kubectl get secretproviderclass helpdesk-dev-db-admin --namespace "$NAMESPACE" >/dev/null
+          kubectl get configmap helpdesk-dev-schema-001 --namespace "$NAMESPACE" >/dev/null
+      - name: Dry-run and create the Job once; never replace an existing Job
+        run: |
+          set -euo pipefail
+          manifest="$RUNNER_TEMP/dev-migration/job.yaml"
+          kubectl create --dry-run=server --namespace "$NAMESPACE" -f "$manifest" >/dev/null
+          if existing=$(kubectl get job "$JOB_NAME" --namespace "$NAMESPACE" -o name 2>&1); then
+            echo "::error::${JOB_NAME} already exists; inspect its status and do not rerun the migration."
+            exit 1
+          elif ! grep -qi 'not found' <<<"$existing"; then
+            echo '::error::Could not prove the migration Job is absent.'
+            printf '%s\n' "$existing"
+            exit 1
+          fi
+          kubectl create --namespace "$NAMESPACE" -f "$manifest"
+          if ! kubectl wait --namespace "$NAMESPACE" --for=condition=complete "job/${JOB_NAME}" --timeout=10m; then
+            kubectl get job "$JOB_NAME" --namespace "$NAMESPACE" -o wide || true
+            kubectl logs --namespace "$NAMESPACE" "job/${JOB_NAME}" -c migrate --all-pods=true || true
+            echo '::error::Migration Job did not complete; preserve it for review and do not rerun blindly.'
+            exit 1
+          fi
+          kubectl logs --namespace "$NAMESPACE" "job/${JOB_NAME}" -c migrate --all-pods=true
+          echo "Completed one-time Job ${JOB_NAME} in ${NAMESPACE}." >> "$GITHUB_STEP_SUMMARY"
