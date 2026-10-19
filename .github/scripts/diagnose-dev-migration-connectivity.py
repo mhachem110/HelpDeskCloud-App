@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 import sys
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 
 PROJECT = "helpdeskcloud-capstone-511905"
@@ -57,9 +57,9 @@ def run(command: list[str], *, kubeconfig: str | None = None) -> subprocess.Comp
             env=environment,
         )
     except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(command, 124, "", "")
+        return subprocess.CompletedProcess(command, 124, "", "[diagnostic:command-timeout]")
     except OSError:
-        return subprocess.CompletedProcess(command, 127, "", "")
+        return subprocess.CompletedProcess(command, 127, "", "[diagnostic:executable-unavailable]")
 
 
 def _combined(result: subprocess.CompletedProcess[str]) -> str:
@@ -70,6 +70,11 @@ def classify_api_result(result: subprocess.CompletedProcess[str]) -> str:
     """Return a safe category instead of logging server response bodies."""
     output = _combined(result)
     lowered = output.lower()
+
+    if "[diagnostic:command-timeout]" in lowered:
+        return "diagnostic-command-timeout"
+    if "[diagnostic:executable-unavailable]" in lowered:
+        return "diagnostic-executable-unavailable"
 
     if any(
         marker in lowered
@@ -83,6 +88,42 @@ def classify_api_result(result: subprocess.CompletedProcess[str]) -> str:
         )
     ):
         return "google-dns-frontend-http-403"
+
+    plugin_invocation = any(
+        marker in lowered
+        for marker in (
+            "gke-gcloud-auth-plugin",
+            "exec plugin",
+            "getting credentials",
+            "failed to get token",
+        )
+    )
+    if plugin_invocation:
+        if any(
+            marker in lowered
+            for marker in (
+                "executable gke-gcloud-auth-plugin not found",
+                "gke-gcloud-auth-plugin: command not found",
+                "fork/exec gke-gcloud-auth-plugin",
+                "exec: no such file or directory",
+            )
+        ):
+            return "gke-auth-plugin-executable-unavailable"
+        if any(
+            marker in lowered
+            for marker in (
+                "failed to retrieve access token",
+                "could not retrieve access token",
+                "could not fetch access token",
+                "oauth2: cannot fetch token",
+                "invalid_grant",
+                "invalid_rapt",
+                "unauthorized_client",
+                "service account impersonation",
+            )
+        ):
+            return "gke-auth-plugin-credential-error"
+        return "gke-auth-plugin-execution-error"
 
     try:
         payload = json.loads(result.stdout)
@@ -112,6 +153,29 @@ def safe_identity(value: str) -> str:
     if re.fullmatch(r"[A-Za-z0-9@._:/-]{1,254}", value):
         return value
     return "<identity omitted: unexpected format>"
+
+
+def credential_impersonation_target_status(path: str) -> str:
+    """Check the ADC impersonation target without exposing credential contents."""
+    if not path or not os.path.isfile(path):
+        return "unavailable"
+    try:
+        with open(path, encoding="utf-8") as credential_file:
+            credentials = json.load(credential_file)
+    except (OSError, json.JSONDecodeError):
+        return "unavailable"
+    if not isinstance(credentials, dict):
+        return "unavailable"
+    target = credentials.get("service_account_impersonation_url")
+    if not isinstance(target, str):
+        return "unavailable"
+    match = re.fullmatch(
+        r"https://iamcredentials\.googleapis\.com/v1/projects/[^/]+/serviceAccounts/([^/:]+):generateAccessToken",
+        target,
+    )
+    if not match:
+        return "unexpected"
+    return "expected" if unquote(match.group(1)) == EXPECTED_IDENTITY else "unexpected"
 
 
 def emit(lines: list[str]) -> None:
@@ -289,10 +353,10 @@ def run_kubernetes_checks(kubeconfig: str, lines: list[str]) -> None:
     identity = kube_command(kubeconfig, "auth", "whoami", "-o", "json")
     record_api_check(lines, "Kubernetes identity", identity, expected_identity=True)
 
-    namespace = kube_command(kubeconfig, "get", "namespace", NAMESPACE, "-o", "name")
-    record_api_check(lines, "Existing helpdesk-dev namespace", namespace)
-    if namespace.returncode == 0 and namespace.stdout.strip() != f"namespace/{NAMESPACE}":
-        lines.append("Namespace response did not identify the expected namespace.")
+    lines.append(
+        "Namespace scope is checked through helpdesk-dev namespaced object reads; "
+        "no cluster-scoped Namespace GET is attempted."
+    )
 
     for label, resource, name in BOOTSTRAP_READS:
         result = kube_command(kubeconfig, "get", f"{resource}/{name}", "--namespace", NAMESPACE, "-o", "name")
@@ -329,6 +393,13 @@ def main() -> int:
         return 2
 
     lines: list[str] = []
+    credential_status = credential_impersonation_target_status(
+        os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+    )
+    lines.append(
+        "Google ADC credential configuration targets the expected migration-runner "
+        f"service account: {'yes' if credential_status == 'expected' else credential_status}."
+    )
     cluster, cluster_ok = describe_cluster(lines)
     if cluster_ok and verify_kube_target(kubeconfig, cluster, lines):
         run_kubernetes_checks(kubeconfig, lines)
