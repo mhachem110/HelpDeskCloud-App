@@ -57,15 +57,29 @@ class SupportingDeliveryPolicyTests(unittest.TestCase):
     def test_migration_is_manual_explicitly_approved_and_never_replaces_job(self):
         workflow, triggers = load_workflow(".github/workflows/dev-db-migration.yml")
         self.assertEqual(set(triggers), {"workflow_dispatch"})
-        self.assertEqual(triggers["workflow_dispatch"]["inputs"]["confirmation"]["default"],
-                         "DO NOT RUN")
+        inputs = triggers["workflow_dispatch"]["inputs"]
+        self.assertEqual(inputs["mode"]["options"], ["diagnostic", "migration"])
+        self.assertEqual(inputs["mode"]["default"], "migration")
+        self.assertEqual(inputs["confirmation"]["default"], "DO NOT RUN")
         preflight = workflow["jobs"]["preflight"]
         preflight_script = "\n".join(step.get("run", "") for step in preflight["steps"])
         self.assertIn("DEV_DB_MIGRATION_ENABLED", preflight_script)
         self.assertIn("RUN helpdesk-dev-schema-001", preflight_script)
+        self.assertIn("DIAGNOSE helpdesk-dev-gke", preflight_script)
+        self.assertIn("diagnostic)", preflight_script)
+        self.assertIn("migration)", preflight_script)
+        diagnostic_gate = preflight_script.split("diagnostic)", 1)[1].split("migration)", 1)[0]
+        migration_gate = preflight_script.split("migration)", 1)[1].split("*)", 1)[0]
+        self.assertNotIn("ENABLED", diagnostic_gate)
+        self.assertIn('[[ "$ENABLED" == \'true\' ]]', migration_gate)
+        self.assertIn('[[ "$CONFIRMATION" == \'DIAGNOSE helpdesk-dev-gke\' ]]', diagnostic_gate)
 
+        render = workflow["jobs"]["render"]
+        self.assertEqual(render["if"], "inputs.mode == 'migration'")
         execute = workflow["jobs"]["execute"]
         self.assertEqual(execute["environment"], "dev-db-migration")
+        self.assertIn("inputs.mode == 'diagnostic'", execute["if"])
+        self.assertIn("needs.preflight.result == 'success'", execute["if"])
         steps = execute["steps"]
         verify = next(i for i, step in enumerate(steps)
                       if "Verify the required GitHub Environment" in step.get("name", ""))
@@ -87,6 +101,42 @@ class SupportingDeliveryPolicyTests(unittest.TestCase):
                          "helpdesk-app-migr-runner-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com")
         self.assertNotIn("cloudsql", migration_script.lower())
         self.assertNotIn("secretmanager", migration_script.lower())
+
+    def test_diagnostic_mode_is_read_only_and_cannot_fall_through_to_migration(self):
+        workflow, _ = load_workflow(".github/workflows/dev-db-migration.yml")
+        jobs = workflow["jobs"]
+        self.assertEqual(jobs["render"]["if"], "inputs.mode == 'migration'")
+        execute = jobs["execute"]
+        diagnostic_steps = [step for step in execute["steps"]
+                            if "diagnostic" in step.get("name", "").lower()
+                            or step.get("id", "").endswith("diagnostics")]
+        self.assertGreaterEqual(len(diagnostic_steps), 3)
+        for step in diagnostic_steps:
+            self.assertEqual(step.get("if"), "inputs.mode == 'diagnostic'")
+        for name in ("Recheck target and bootstrap objects with the approved identity",
+                     "Dry-run and create the Job once; never replace an existing Job"):
+            step = next(step for step in execute["steps"] if step.get("name") == name)
+            self.assertEqual(step["if"], "inputs.mode == 'migration'")
+
+        credentials = [step for step in execute["steps"]
+                       if str(step.get("uses", "")).startswith("google-github-actions/get-gke-credentials@")]
+        self.assertEqual(len(credentials), 2)
+        self.assertEqual(credentials[0]["with"]["use_auth_provider"], False)
+        self.assertEqual(credentials[1]["with"]["use_auth_provider"], True)
+        for credential_step in credentials:
+            self.assertTrue(credential_step.get("if") in (None, "inputs.mode == 'diagnostic'"))
+            self.assertEqual(credential_step["with"]["use_dns_based_endpoint"], True)
+            self.assertEqual(credential_step["with"]["project_id"], "helpdeskcloud-capstone-511905")
+            self.assertEqual(credential_step["with"]["cluster_name"], "helpdeskcloud-dev-gke")
+
+        script = (ROOT / ".github/scripts/diagnose-dev-migration-connectivity.py").read_text()
+        self.assertIn('"get", "--raw=/version"', script)
+        self.assertIn('"auth", "whoami", "-o", "json"', script)
+        self.assertIn('"auth",\n            "can-i"', script)
+        for mutating_command in ("kubectl create", "kubectl apply", "kubectl replace", "kubectl delete"):
+            self.assertNotIn(mutating_command, script)
+        self.assertNotIn("print(result.stderr)", script)
+        self.assertNotIn("print(result.stdout)", script)
 
     def test_migration_runner_rbac_is_namespace_scoped_and_read_limited(self):
         role, binding = list(yaml.safe_load_all(
