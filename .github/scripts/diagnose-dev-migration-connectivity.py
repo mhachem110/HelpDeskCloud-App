@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -22,6 +23,7 @@ EXPECTED_IDENTITY = (
     "helpdesk-app-migr-runner-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com"
 )
 TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
+GKE_IAM_PROPAGATION_RETRY_SECONDS = 8 * 60
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 USERINFO_EMAIL_SCOPE = "https://www.googleapis.com/auth/userinfo.email"
 BOOTSTRAP_READS = (
@@ -575,11 +577,42 @@ def record_api_check(
     return category
 
 
+def wait_for_api_version(kubeconfig: str, lines: list[str]) -> str:
+    """Retry only the GKE DNS frontend 403 while a new IAM grant propagates."""
+    deadline = time.monotonic() + GKE_IAM_PROPAGATION_RETRY_SECONDS
+    delay_seconds = 5
+    retries = 0
+
+    while True:
+        result = kube_command(kubeconfig, "get", "--raw=/version")
+        category = classify_api_result(result)
+        if category != "google-dns-frontend-http-403":
+            if retries:
+                lines.append(f"GKE DNS endpoint became reachable after {retries} retry attempt(s).")
+            return record_api_check(lines, "Kubernetes API version probe", result)
+
+        retries += 1
+        remaining = deadline - time.monotonic()
+        if retries == 1:
+            lines.append(
+                "GKE DNS endpoint returned an HTML HTTP 403; retrying for up to eight minutes "
+                "to allow a recent IAM connect grant to propagate."
+            )
+        if remaining <= 0:
+            lines.append(
+                f"Kubernetes API version probe: {category} after waiting up to "
+                f"{GKE_IAM_PROPAGATION_RETRY_SECONDS} seconds; the endpoint remains blocked. "
+                "The IAM grant might still be propagating or the endpoint policy might deny this identity."
+            )
+            return category
+
+        time.sleep(min(delay_seconds, remaining))
+        delay_seconds = min(delay_seconds * 2, 60)
+
+
 def run_kubernetes_checks(kubeconfig: str, lines: list[str]) -> bool:
-    checks_ok = True
-    version = kube_command(kubeconfig, "get", "--raw=/version")
-    version_category = record_api_check(lines, "Kubernetes API version probe", version)
-    checks_ok = checks_ok and version_category == "success"
+    version_category = wait_for_api_version(kubeconfig, lines)
+    checks_ok = version_category == "success"
 
     identity = kube_command(kubeconfig, "auth", "whoami", "-o", "json")
     identity_status = record_api_check(lines, "Kubernetes identity", identity, expected_identity=True)
@@ -650,7 +683,7 @@ def main() -> int:
             except OSError:
                 lines.append("Temporary credential cleanup failed; inspect the runner workspace before reuse.")
                 credential_ok = False
-    lines.append("Diagnostic mode performs no Kubernetes writes and never runs migration SQL.")
+    lines.append("Connectivity preflight performs no Kubernetes writes and never runs migration SQL.")
     emit(lines)
     return 0 if adc_identity_ok and target_ok and credential_ok and api_ok else 1
 

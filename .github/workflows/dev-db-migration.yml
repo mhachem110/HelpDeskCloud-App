@@ -145,28 +145,11 @@ jobs:
           project_id: helpdeskcloud-capstone-511905
           workload_identity_provider: projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/github-app-migration-dev
           service_account: helpdesk-app-migr-runner-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
-      - uses: google-github-actions/get-gke-credentials@v3
-        id: gke-token
-        if: inputs.mode == 'diagnostic'
-        with:
-          project_id: helpdeskcloud-capstone-511905
-          cluster_name: helpdeskcloud-dev-gke
-          location: us-east1
-          use_dns_based_endpoint: true
-          use_auth_provider: false
       - name: Install the supported GKE authentication plugin
         uses: google-github-actions/setup-gcloud@v3
         with:
           version: '>= 363.0.0'
           install_components: gke-gcloud-auth-plugin
-      - name: Diagnose short-lived token connectivity (read-only)
-        id: token-diagnostics
-        if: inputs.mode == 'diagnostic'
-        env:
-          KUBECONFIG_PATH: ${{ steps.gke-token.outputs.kubeconfig_path }}
-          AUTH_METHOD: short-lived-access-token
-        continue-on-error: true
-        run: python3 .github/scripts/diagnose-dev-migration-connectivity.py
       - name: Generate supported DNS-endpoint kubeconfig with the GKE exec plugin
         id: gke-plugin
         env:
@@ -178,30 +161,27 @@ jobs:
             --project "$PROJECT_ID" \
             --location "$REGION" \
             --dns-endpoint
-      - name: Diagnose GKE auth plugin connectivity (read-only)
+      - name: Run read-only GKE connectivity preflight
         id: plugin-diagnostics
-        if: inputs.mode == 'diagnostic'
         env:
           KUBECONFIG_PATH: ${{ runner.temp }}/helpdesk-dev-gke-kubeconfig
           AUTH_METHOD: gke-gcloud-auth-plugin
-        continue-on-error: true
+        continue-on-error: ${{ inputs.mode == 'diagnostic' }}
         run: python3 .github/scripts/diagnose-dev-migration-connectivity.py
       - name: Finish diagnostics without entering the migration path
         if: ${{ always() && inputs.mode == 'diagnostic' }}
         env:
-          TOKEN_RESULT: ${{ steps.token-diagnostics.outcome }}
           PLUGIN_RESULT: ${{ steps.plugin-diagnostics.outcome }}
         run: |
           set -euo pipefail
           {
             echo '## Dev GKE migration connectivity diagnostics'
             echo
-            echo "Short-lived token check: ${TOKEN_RESULT:-not-run}."
-            echo "GKE exec-plugin check: ${PLUGIN_RESULT:-not-run}."
+            echo "GKE DNS endpoint connectivity check: ${PLUGIN_RESULT:-not-run}."
             echo 'Checks are read-only. No Kubernetes resources were changed and no migration Job or SQL was executed.'
           } >> "$GITHUB_STEP_SUMMARY"
-          if [[ "$TOKEN_RESULT" != success || "$PLUGIN_RESULT" != success ]]; then
-            echo '::error::One or more read-only GKE connectivity checks failed. See sanitized diagnostics above.'
+          if [[ "$PLUGIN_RESULT" != success ]]; then
+            echo '::error::The read-only GKE connectivity check failed. See sanitized diagnostics above.'
             exit 1
           fi
       - name: Recheck target and bootstrap objects with the approved identity
