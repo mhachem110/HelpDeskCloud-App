@@ -7,6 +7,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+from urllib.parse import parse_qs, urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -93,6 +95,18 @@ class DiagnosticClassificationTests(unittest.TestCase):
             "gke-auth-plugin-execution-error",
         )
 
+    def test_classifies_removed_legacy_gcp_auth_provider(self):
+        result = subprocess.CompletedProcess(
+            ["kubectl"],
+            1,
+            "",
+            "no Auth Provider found for name gcp",
+        )
+        self.assertEqual(
+            DIAGNOSTICS.classify_api_result(result),
+            "legacy-gcp-auth-provider-unsupported",
+        )
+
     def test_report_records_only_sanitized_category_not_response_body(self):
         secret_like_body = "<!doctype html> session access_token=do-not-print-this"
         result = subprocess.CompletedProcess(["kubectl"], 1, "", secret_like_body)
@@ -141,6 +155,143 @@ class DiagnosticClassificationTests(unittest.TestCase):
                 "unexpected",
             )
 
+    def test_tokeninfo_requires_expected_service_account_and_scopes(self):
+        valid = {
+            "email": DIAGNOSTICS.EXPECTED_IDENTITY,
+            "scope": (
+                f"{DIAGNOSTICS.CLOUD_PLATFORM_SCOPE} "
+                f"{DIAGNOSTICS.USERINFO_EMAIL_SCOPE}"
+            ),
+        }
+        self.assertEqual(DIAGNOSTICS.token_identity_and_scope_status(valid), ("expected", True))
+        self.assertEqual(
+            DIAGNOSTICS.token_identity_and_scope_status(
+                {**valid, "email": "other@example.test"}
+            ),
+            ("token-identity-unexpected", False),
+        )
+        self.assertEqual(
+            DIAGNOSTICS.token_identity_and_scope_status(
+                {**valid, "scope": DIAGNOSTICS.USERINFO_EMAIL_SCOPE}
+            ),
+            ("token-cloud-platform-scope-missing", False),
+        )
+        self.assertEqual(
+            DIAGNOSTICS.token_identity_and_scope_status(
+                {**valid, "scope": DIAGNOSTICS.CLOUD_PLATFORM_SCOPE}
+            ),
+            ("token-userinfo-email-scope-missing", False),
+        )
+
+    def test_tokeninfo_posts_token_in_body_and_never_in_url(self):
+        token = "sensitive-test-token"
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(
+            {
+                "email": DIAGNOSTICS.EXPECTED_IDENTITY,
+                "scope": f"{DIAGNOSTICS.CLOUD_PLATFORM_SCOPE} {DIAGNOSTICS.USERINFO_EMAIL_SCOPE}",
+            }
+        ).encode()
+        with mock.patch.object(DIAGNOSTICS, "urlopen", return_value=response) as open_url:
+            payload = DIAGNOSTICS.introspect_access_token(token)
+
+        request = open_url.call_args.args[0]
+        self.assertEqual(urlparse(request.full_url).query, "")
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(
+            parse_qs(request.data.decode())["access_token"],
+            [token],
+        )
+        self.assertEqual(payload["email"], DIAGNOSTICS.EXPECTED_IDENTITY)
+
+    def test_token_identity_report_does_not_echo_token_or_tokeninfo_payload(self):
+        token = "sensitive-test-token"
+        config = {
+            "contexts": [{"name": "context", "context": {"user": "runner"}}],
+            "users": [{"name": "runner", "user": {"token": token}}],
+        }
+        with (
+            mock.patch.object(DIAGNOSTICS, "minified_kubeconfig", return_value=(config, "readable")),
+            mock.patch.object(
+                DIAGNOSTICS,
+                "introspect_access_token",
+                return_value={
+                    "email": DIAGNOSTICS.EXPECTED_IDENTITY,
+                    "scope": f"{DIAGNOSTICS.CLOUD_PLATFORM_SCOPE} {DIAGNOSTICS.USERINFO_EMAIL_SCOPE}",
+                    "access_token": token,
+                },
+            ),
+        ):
+            lines = []
+            self.assertTrue(DIAGNOSTICS.verify_kubeconfig_credentials("unused", lines))
+        self.assertNotIn(token, "\n".join(lines))
+        self.assertNotIn("access_token", "\n".join(lines))
+
+    def test_plugin_kubeconfig_requires_exec_plugin_and_adc_flag(self):
+        config = {
+            "current-context": "context",
+            "contexts": [{"name": "context", "context": {"user": "runner", "cluster": "dev"}}],
+            "clusters": [{"name": "dev", "cluster": {"server": "https://dev.gke.goog"}}],
+            "users": [{
+                "name": "runner",
+                "user": {
+                    "exec": {
+                        "apiVersion": "client.authentication.k8s.io/v1beta1",
+                        "command": "gke-gcloud-auth-plugin",
+                        "args": ["--use_application_default_credentials"],
+                        "provideClusterInfo": True,
+                    }
+                },
+            }],
+        }
+        plugin_token = "plugin-test-token"
+        plugin_response = json.dumps({
+            "apiVersion": "client.authentication.k8s.io/v1beta1",
+            "kind": "ExecCredential",
+            "status": {"token": plugin_token},
+        })
+        with (
+            mock.patch.object(DIAGNOSTICS, "minified_kubeconfig", return_value=(config, "readable")),
+            mock.patch.object(
+                DIAGNOSTICS,
+                "run",
+                return_value=subprocess.CompletedProcess(["gke-gcloud-auth-plugin"], 0, plugin_response, ""),
+            ) as run_plugin,
+            mock.patch.object(
+                DIAGNOSTICS,
+                "introspect_access_token",
+                return_value={
+                    "email": DIAGNOSTICS.EXPECTED_IDENTITY,
+                    "scope": f"{DIAGNOSTICS.CLOUD_PLATFORM_SCOPE} {DIAGNOSTICS.USERINFO_EMAIL_SCOPE}",
+                },
+            ) as inspect_token,
+        ):
+            lines = []
+            ok, token_config_path, cleanup_path = DIAGNOSTICS.prepare_api_kubeconfig("unused", lines)
+            self.assertTrue(ok)
+            self.assertEqual(token_config_path, cleanup_path)
+            with open(token_config_path, encoding="utf-8") as token_config:
+                prepared = json.load(token_config)
+            self.assertEqual(prepared["users"][0]["user"]["token"], plugin_token)
+            self.assertNotIn("exec", prepared["users"][0]["user"])
+            exec_info = json.loads(run_plugin.call_args.kwargs["extra_env"]["KUBERNETES_EXEC_INFO"])
+            self.assertEqual(exec_info["spec"]["cluster"]["server"], "https://dev.gke.goog")
+            self.assertEqual(inspect_token.call_args.args, (plugin_token,))
+            os.unlink(cleanup_path)
+
+        legacy_config = {
+            "contexts": [{"name": "context", "context": {"user": "runner"}}],
+            "users": [{"name": "runner", "user": {"auth-provider": {"name": "gcp"}}}],
+        }
+        with mock.patch.object(
+            DIAGNOSTICS,
+            "minified_kubeconfig",
+            return_value=(legacy_config, "readable"),
+        ):
+            legacy_lines = []
+            self.assertFalse(DIAGNOSTICS.verify_kubeconfig_credentials("unused", legacy_lines))
+        self.assertIn("unsupported legacy gcp auth-provider", "\n".join(legacy_lines))
+
     def test_namespace_probes_do_not_request_cluster_scoped_namespace_object(self):
         commands = []
 
@@ -160,7 +311,7 @@ class DiagnosticClassificationTests(unittest.TestCase):
         DIAGNOSTICS.kube_command = fake_kube_command
         try:
             lines = []
-            DIAGNOSTICS.run_kubernetes_checks("unused", lines)
+            self.assertTrue(DIAGNOSTICS.run_kubernetes_checks("unused", lines))
         finally:
             DIAGNOSTICS.kube_command = original
 
@@ -176,6 +327,45 @@ class DiagnosticClassificationTests(unittest.TestCase):
             )
         )
         self.assertIn("no cluster-scoped Namespace GET is attempted.", "\n".join(lines))
+
+    def test_kubernetes_connectivity_failures_return_failure(self):
+        original = DIAGNOSTICS.kube_command
+
+        def denied_kube_command(_kubeconfig, *args):
+            if args[:2] == ("get", "--raw=/version"):
+                return subprocess.CompletedProcess(
+                    ["kubectl"], 1, "", "<!doctype html><title>403 Forbidden</title>"
+                )
+            if args[:3] == ("auth", "whoami", "-o"):
+                return subprocess.CompletedProcess(["kubectl"], 1, "", "403 Forbidden")
+            return subprocess.CompletedProcess(["kubectl"], 1, "", "403 Forbidden")
+
+        DIAGNOSTICS.kube_command = denied_kube_command
+        try:
+            lines = []
+            self.assertFalse(DIAGNOSTICS.run_kubernetes_checks("unused", lines))
+        finally:
+            DIAGNOSTICS.kube_command = original
+        self.assertIn("Read-only Kubernetes connectivity and namespace checks: FAIL.", "\n".join(lines))
+
+    def test_main_exits_nonzero_when_verified_target_still_cannot_connect(self):
+        with (
+            mock.patch.dict(
+                os.environ,
+                {
+                    "KUBECONFIG_PATH": "unused-kubeconfig",
+                    "GOOGLE_APPLICATION_CREDENTIALS": "unused-adc",
+                },
+            ),
+            mock.patch.object(DIAGNOSTICS.os.path, "isfile", return_value=True),
+            mock.patch.object(DIAGNOSTICS, "credential_impersonation_target_status", return_value="expected"),
+            mock.patch.object(DIAGNOSTICS, "describe_cluster", return_value=({"name": "verified"}, True)),
+            mock.patch.object(DIAGNOSTICS, "verify_kube_target", return_value=True),
+            mock.patch.object(DIAGNOSTICS, "prepare_api_kubeconfig", return_value=(True, "unused-kubeconfig", None)),
+            mock.patch.object(DIAGNOSTICS, "run_kubernetes_checks", return_value=False),
+            mock.patch.object(DIAGNOSTICS, "emit"),
+        ):
+            self.assertEqual(DIAGNOSTICS.main(), 1)
 
 if __name__ == "__main__":
     unittest.main()
