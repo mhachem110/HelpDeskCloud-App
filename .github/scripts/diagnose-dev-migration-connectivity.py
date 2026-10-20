@@ -23,7 +23,9 @@ EXPECTED_IDENTITY = (
     "helpdesk-app-migr-runner-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com"
 )
 TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
-GKE_IAM_PROPAGATION_RETRY_SECONDS = 8 * 60
+GKE_IAM_PROPAGATION_RETRY_SECONDS = int(
+    os.environ.get("GKE_IAM_PROPAGATION_RETRY_SECONDS", "0")
+)
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 USERINFO_EMAIL_SCOPE = "https://www.googleapis.com/auth/userinfo.email"
 BOOTSTRAP_READS = (
@@ -591,12 +593,16 @@ def wait_for_api_version(kubeconfig: str, lines: list[str]) -> str:
                 lines.append(f"GKE DNS endpoint became reachable after {retries} retry attempt(s).")
             return record_api_check(lines, "Kubernetes API version probe", result)
 
+        if GKE_IAM_PROPAGATION_RETRY_SECONDS <= 0:
+            return record_api_check(lines, "Kubernetes API version probe", result)
+
         retries += 1
         remaining = deadline - time.monotonic()
         if retries == 1:
             lines.append(
-                "GKE DNS endpoint returned an HTML HTTP 403; retrying for up to eight minutes "
-                "to allow a recent IAM connect grant to propagate."
+                "GKE DNS endpoint returned an HTML HTTP 403; retrying for up to "
+                f"{GKE_IAM_PROPAGATION_RETRY_SECONDS} seconds to allow a recent IAM "
+                "connect grant to propagate."
             )
         if remaining <= 0:
             lines.append(

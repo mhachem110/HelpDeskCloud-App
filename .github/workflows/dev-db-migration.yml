@@ -166,6 +166,7 @@ jobs:
         env:
           KUBECONFIG_PATH: ${{ runner.temp }}/helpdesk-dev-gke-kubeconfig
           AUTH_METHOD: gke-gcloud-auth-plugin
+          GKE_IAM_PROPAGATION_RETRY_SECONDS: 480
         continue-on-error: ${{ inputs.mode == 'diagnostic' }}
         run: python3 .github/scripts/diagnose-dev-migration-connectivity.py
       - name: Finish diagnostics without entering the migration path
