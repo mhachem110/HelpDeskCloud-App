@@ -31,14 +31,24 @@ spec:
         - name: cloud-sql-proxy
           restartPolicy: Always
           image: "{{ required "proxy image repository required" .Values.cloudSqlProxy.image.repository }}@{{ .Values.cloudSqlProxy.image.digest }}"
+          # Probe the Pod-reachable HTTP listener while keeping SQL bound to loopback.
           args:
             - --private-ip
             - --address=127.0.0.1
             - --port=5432
+            - --health-check
+            - --http-address=0.0.0.0
+            - --http-port=9801
             - {{ required "Cloud SQL instance name required" .Values.cloudSqlProxy.instanceConnectionName | quote }}
+          ports:
+            - name: health
+              containerPort: 9801
+              protocol: TCP
           startupProbe:
-            tcpSocket:
-              port: 5432
+            httpGet:
+              path: /startup
+              port: health
+              scheme: HTTP
             periodSeconds: 5
             failureThreshold: 30
           resources:

@@ -91,6 +91,16 @@ class GkeManifestTests(unittest.TestCase):
         sidecar = job["initContainers"][0]
         self.assertEqual(sidecar["restartPolicy"], "Always")
         self.assertIn("--private-ip", sidecar["args"])
+        self.assertIn("--address=127.0.0.1", sidecar["args"])
+        self.assertNotIn("--address=0.0.0.0", sidecar["args"])
+        self.assertIn("--health-check", sidecar["args"])
+        self.assertIn("--http-address=0.0.0.0", sidecar["args"])
+        self.assertIn("--http-port=9801", sidecar["args"])
+        self.assertEqual(sidecar["ports"], [{"name": "health", "containerPort": 9801, "protocol": "TCP"}])
+        self.assertEqual(sidecar["startupProbe"]["httpGet"],
+                         {"path": "/startup", "port": "health", "scheme": "HTTP"})
+        self.assertEqual(sidecar["startupProbe"]["periodSeconds"], 5)
+        self.assertEqual(sidecar["startupProbe"]["failureThreshold"], 30)
         self.assertIn("@sha256:", sidecar["image"])
         self.assertIn("@sha256:", job["containers"][0]["image"])
         self.assertEqual(job["volumes"][0]["csi"]["driver"], "secrets-store-gke.csi.k8s.io")
