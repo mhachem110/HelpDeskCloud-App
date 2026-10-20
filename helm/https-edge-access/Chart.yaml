@@ -1,0 +1,5 @@
+apiVersion: v2
+name: helpdesk-edge-access
+version: 0.1.0
+description: Separately managed GKE Gateway HTTPS edge for HelpDesk Cloud
+type: application

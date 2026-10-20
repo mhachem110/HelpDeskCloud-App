@@ -5,6 +5,9 @@
 {{- if and .Values.cloudSqlProxy.enabled (not (regexMatch "^sha256:[0-9a-f]{64}$" .Values.cloudSqlProxy.image.digest)) }}
 {{- fail "A real immutable Cloud SQL Auth Proxy image digest is required" }}
 {{- end }}
+{{- if and .Values.iap.enabled (or (empty .Values.iap.expectedAudience) (empty .Values.iap.allowedEmail)) }}
+{{- fail "IAP enforcement requires an expected audience and an approved email" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -58,6 +61,14 @@ spec:
           env:
             - name: ASPNETCORE_URLS
               value: "http://+:8080"
+            - name: Iap__Enabled
+              value: {{ .Values.iap.enabled | quote }}
+            {{- if .Values.iap.enabled }}
+            - name: Iap__ExpectedAudience
+              value: {{ .Values.iap.expectedAudience | quote }}
+            - name: Iap__AllowedEmail
+              value: {{ .Values.iap.allowedEmail | quote }}
+            {{- end }}
             {{- if .Values.database.connectionFile.enabled }}
             - name: DATABASE_CONNECTION_STRING_FILE
               value: {{ .Values.database.connectionFile.path | quote }}

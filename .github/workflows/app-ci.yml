@@ -113,5 +113,18 @@ jobs:
             -f helm/helpdesk/values-dev-delivery.yaml \
             --set image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
             --set cloudSqlProxy.image.digest=sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb > /tmp/helpdesk-release.yaml
-          "$(go env GOPATH)/bin/kubeconform" -strict -summary -ignore-missing-schemas -kubernetes-version 1.33.0 /tmp/helpdesk-dev.yaml /tmp/helpdesk-migration.yaml /tmp/helpdesk-release.yaml k8s/dev-delivery-rbac.yaml k8s/dev-migration-runner-rbac.yaml
+          python .github/scripts/check-private-release.py /tmp/helpdesk-release.yaml
+          helm lint helm/https-edge-access
+          for stage in health-only application; do
+            helm template helpdesk-edge helm/https-edge-access -n helpdesk-dev \
+              --set enabled=true --set-string "stage=$stage" --set-string hostname=dev.example.com \
+              --set-string certificateMap=helpdesk-dev-cert-map --set-string staticIpName=helpdesk-dev-https-ip \
+              --set-string sslPolicyName=helpdesk-dev-tls \
+              --set-string oauthClientId=123456789012-abc.apps.googleusercontent.com \
+              > "/tmp/helpdesk-edge-${stage}.yaml"
+            python .github/scripts/check-https-edge.py "/tmp/helpdesk-edge-${stage}.yaml" \
+              "$stage" dev.example.com helpdesk-dev-cert-map helpdesk-dev-https-ip helpdesk-dev-tls \
+              123456789012-abc.apps.googleusercontent.com
+          done
+          "$(go env GOPATH)/bin/kubeconform" -strict -summary -ignore-missing-schemas -kubernetes-version 1.33.0 /tmp/helpdesk-dev.yaml /tmp/helpdesk-migration.yaml /tmp/helpdesk-release.yaml /tmp/helpdesk-edge-health-only.yaml /tmp/helpdesk-edge-application.yaml k8s/dev-delivery-rbac.yaml k8s/dev-migration-runner-rbac.yaml
           python -m unittest discover -s tests -p 'test_*.py' -v

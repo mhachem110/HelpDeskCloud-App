@@ -4,6 +4,18 @@ on:
   push:
     branches: [dev]
   workflow_dispatch:
+    inputs:
+      https_stage:
+        description: HTTPS edge stage. Leave at none for ordinary app delivery.
+        required: true
+        type: choice
+        options: [none, health-only, application]
+        default: none
+      confirm_application_route:
+        description: Confirm that the app's IAP assertion enforcement and the exact IAP user grant were verified before routing ticket paths.
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -22,7 +34,7 @@ env:
 jobs:
   package:
     name: Test, build and scan reviewed source
-    if: github.repository == 'mhachem110/HelpDeskCloud-App' && github.ref == 'refs/heads/dev' && vars.DEV_APP_CD_ENABLED == 'true'
+    if: github.repository == 'mhachem110/HelpDeskCloud-App' && github.ref == 'refs/heads/dev' && vars.DEV_APP_CD_ENABLED == 'true' && (github.event_name != 'workflow_dispatch' || inputs.https_stage == 'none')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -136,10 +148,19 @@ jobs:
         env:
           APP_DIGEST: ${{ needs.publish.outputs.image_digest }}
           PROXY_DIGEST: ${{ vars.DEV_PROXY_IMAGE_DIGEST }}
+          HTTPS_ACTIVE: ${{ vars.DEV_HTTPS_ACTIVE }}
+          IAP_ALLOWED_EMAIL: ${{ vars.DEV_IAP_ALLOWED_EMAIL }}
+          IAP_BACKEND_SERVICE_ID: ${{ vars.DEV_IAP_BACKEND_SERVICE_ID }}
         run: |
           set -euo pipefail
           [[ "$APP_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$PROXY_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo '::error::Approved proxy image digest is missing or invalid.'; exit 1; }
+          if [[ "$HTTPS_ACTIVE" == 'true' ]]; then
+            [[ "$IAP_BACKEND_SERVICE_ID" =~ ^[0-9]+$ ]] || { echo '::error::HTTPS is active but DEV_IAP_BACKEND_SERVICE_ID is missing or invalid.'; exit 1; }
+            [[ "$IAP_ALLOWED_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]] || { echo '::error::HTTPS is active but DEV_IAP_ALLOWED_EMAIL is missing or invalid.'; exit 1; }
+          fi
+      - name: Install offline manifest validator dependency
+        run: python -m pip install --disable-pip-version-check PyYAML==6.0.2
       - uses: google-github-actions/auth@v3
         with:
           project_id: helpdeskcloud-capstone-511905
@@ -165,22 +186,41 @@ jobs:
         env:
           APP_DIGEST: ${{ needs.publish.outputs.image_digest }}
           PROXY_DIGEST: ${{ vars.DEV_PROXY_IMAGE_DIGEST }}
+          HTTPS_ACTIVE: ${{ vars.DEV_HTTPS_ACTIVE }}
+          IAP_ALLOWED_EMAIL: ${{ vars.DEV_IAP_ALLOWED_EMAIL }}
+          IAP_BACKEND_SERVICE_ID: ${{ vars.DEV_IAP_BACKEND_SERVICE_ID }}
         run: |
           set -euo pipefail
+          iap_args=(--set iap.enabled=false)
+          if [[ "$HTTPS_ACTIVE" == 'true' ]]; then
+            audience="/projects/260283083469/global/backendServices/${IAP_BACKEND_SERVICE_ID}"
+            iap_args=(--set iap.enabled=true --set-string "iap.expectedAudience=$audience" --set-string "iap.allowedEmail=$IAP_ALLOWED_EMAIL")
+          fi
           helm lint helm/helpdesk -f helm/helpdesk/values-dev.yaml -f helm/helpdesk/values-dev-delivery.yaml \
-            --set-string image.digest="$APP_DIGEST" --set-string cloudSqlProxy.image.digest="$PROXY_DIGEST"
+            --set-string image.digest="$APP_DIGEST" --set-string cloudSqlProxy.image.digest="$PROXY_DIGEST" "${iap_args[@]}"
           helm template helpdesk helm/helpdesk -n "$NAMESPACE" -f helm/helpdesk/values-dev.yaml -f helm/helpdesk/values-dev-delivery.yaml \
             --set-string image.digest="$APP_DIGEST" --set-string cloudSqlProxy.image.digest="$PROXY_DIGEST" \
+            "${iap_args[@]}" \
             > "$RUNNER_TEMP/helpdesk-release.yaml"
+          python .github/scripts/check-private-release.py "$RUNNER_TEMP/helpdesk-release.yaml"
           kubectl apply --dry-run=server -n "$NAMESPACE" -f "$RUNNER_TEMP/helpdesk-release.yaml" >/dev/null
       - name: Deploy and wait for two healthy replicas
         env:
           APP_DIGEST: ${{ needs.publish.outputs.image_digest }}
           PROXY_DIGEST: ${{ vars.DEV_PROXY_IMAGE_DIGEST }}
+          HTTPS_ACTIVE: ${{ vars.DEV_HTTPS_ACTIVE }}
+          IAP_ALLOWED_EMAIL: ${{ vars.DEV_IAP_ALLOWED_EMAIL }}
+          IAP_BACKEND_SERVICE_ID: ${{ vars.DEV_IAP_BACKEND_SERVICE_ID }}
         run: |
           set -euo pipefail
+          iap_args=(--set iap.enabled=false)
+          if [[ "$HTTPS_ACTIVE" == 'true' ]]; then
+            audience="/projects/260283083469/global/backendServices/${IAP_BACKEND_SERVICE_ID}"
+            iap_args=(--set iap.enabled=true --set-string "iap.expectedAudience=$audience" --set-string "iap.allowedEmail=$IAP_ALLOWED_EMAIL")
+          fi
           helm upgrade --install helpdesk helm/helpdesk -n "$NAMESPACE" -f helm/helpdesk/values-dev.yaml -f helm/helpdesk/values-dev-delivery.yaml \
             --set-string image.digest="$APP_DIGEST" --set-string cloudSqlProxy.image.digest="$PROXY_DIGEST" \
+            "${iap_args[@]}" \
             --wait --timeout 10m
           kubectl rollout status deployment/helpdesk-helpdesk -n "$NAMESPACE" --timeout=5m
           kubectl get deployment helpdesk-helpdesk -n "$NAMESPACE" -o json | jq -e \
@@ -192,7 +232,7 @@ jobs:
           kubectl port-forward --address 127.0.0.1 -n "$NAMESPACE" service/helpdesk-helpdesk 18080:80 > "$RUNNER_TEMP/port-forward.log" 2>&1 &
           forward_pid=$!
           trap 'kill "$forward_pid" 2>/dev/null || true' EXIT
-          for attempt in $(seq 1 30); do
+          for _attempt in $(seq 1 30); do
             if curl -fsS --max-time 3 http://127.0.0.1:18080/health/live >/dev/null && \
                curl -fsS --max-time 3 http://127.0.0.1:18080/health/ready >/dev/null; then
               echo 'Both health endpoints passed through the internal Service.'
@@ -206,7 +246,166 @@ jobs:
         env:
           APP_DIGEST: ${{ needs.publish.outputs.image_digest }}
         run: |
-          echo "Commit: ${GITHUB_SHA}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Image: ${IMAGE_REPOSITORY}@${APP_DIGEST}" >> "$GITHUB_STEP_SUMMARY"
-          echo "Helm revision: $(helm history helpdesk -n "$NAMESPACE" -o json | jq -r '.[-1].revision')" >> "$GITHUB_STEP_SUMMARY"
-          echo 'Dev Deployment: 2 ready replicas, internal ClusterIP, health checks passed.' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "Commit: ${GITHUB_SHA}"
+            echo "Image: ${IMAGE_REPOSITORY}@${APP_DIGEST}"
+            echo "Helm revision: $(helm history helpdesk -n "$NAMESPACE" -o json | jq -r '.[-1].revision')"
+            echo 'Dev Deployment: 2 ready replicas, internal ClusterIP, health checks passed.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  https-edge:
+    name: Separately approved HTTPS edge stage
+    if: github.repository == 'mhachem110/HelpDeskCloud-App' && github.ref == 'refs/heads/dev' && github.event_name == 'workflow_dispatch' && inputs.https_stage != 'none'
+    environment: dev-app-deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    env:
+      HTTPS_STAGE: ${{ inputs.https_stage }}
+      HTTPS_EDGE_ENABLED: ${{ vars.DEV_HTTPS_EDGE_ENABLED }}
+      HTTPS_ACTIVE: ${{ vars.DEV_HTTPS_ACTIVE }}
+      HTTPS_HOSTNAME: ${{ vars.DEV_HTTPS_HOSTNAME }}
+      HTTPS_CERTIFICATE_MAP: ${{ vars.DEV_HTTPS_CERTIFICATE_MAP }}
+      HTTPS_STATIC_IP_NAME: ${{ vars.DEV_HTTPS_STATIC_IP_NAME }}
+      HTTPS_SSL_POLICY: ${{ vars.DEV_HTTPS_SSL_POLICY }}
+      HTTPS_STATIC_IP: ${{ vars.DEV_HTTPS_STATIC_IP }}
+      IAP_OAUTH_CLIENT_ID: ${{ vars.DEV_IAP_OAUTH_CLIENT_ID }}
+      IAP_ALLOWED_EMAIL: ${{ vars.DEV_IAP_ALLOWED_EMAIL }}
+      IAP_BACKEND_SERVICE_ID: ${{ vars.DEV_IAP_BACKEND_SERVICE_ID }}
+    steps:
+      - uses: actions/checkout@v4.2.2
+        with:
+          persist-credentials: false
+      - name: Verify protected deployment Environment before OIDC
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_ENVIRONMENT: dev-app-deploy
+        run: bash .github/scripts/verify-dev-environment.sh
+      - name: Require owner-configured HTTPS prerequisites
+        env:
+          CONFIRM_APPLICATION_ROUTE: ${{ inputs.confirm_application_route }}
+        run: |
+          set -euo pipefail
+          [[ "$HTTPS_EDGE_ENABLED" == 'true' ]] || { echo '::error::HTTPS edge rollout is disabled. Set DEV_HTTPS_EDGE_ENABLED only after domain, certificate, OAuth and cost review.'; exit 1; }
+          [[ "$HTTPS_HOSTNAME" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || { echo '::error::Set the owner-controlled DEV_HTTPS_HOSTNAME.'; exit 1; }
+          [[ "$HTTPS_CERTIFICATE_MAP" =~ ^[a-z][a-z0-9-]{0,62}$ ]]
+          [[ "$HTTPS_STATIC_IP_NAME" =~ ^[a-z][a-z0-9-]{0,62}$ ]]
+          [[ "$HTTPS_SSL_POLICY" =~ ^[a-z][a-z0-9-]{0,62}$ ]]
+          [[ "$HTTPS_STATIC_IP" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]
+          [[ "$IAP_OAUTH_CLIENT_ID" =~ ^[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com$ ]]
+          if [[ "$HTTPS_STAGE" == 'application' ]]; then
+            [[ "$HTTPS_ACTIVE" == 'true' ]] || { echo '::error::Application routing requires DEV_HTTPS_ACTIVE=true and a separately successful signed-IAP app deployment.'; exit 1; }
+            [[ "$CONFIRM_APPLICATION_ROUTE" == 'true' ]] || { echo '::error::Confirm the IAP backend user grant and signed-assertion tests before expanding the route.'; exit 1; }
+            [[ "$IAP_BACKEND_SERVICE_ID" =~ ^[0-9]+$ ]]
+            [[ "$IAP_ALLOWED_EMAIL" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]
+          elif [[ "$HTTPS_STAGE" != 'health-only' ]]; then
+            echo '::error::Unknown HTTPS stage.'
+            exit 1
+          fi
+      - name: Render and validate the exact HTTPS route stage
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check PyYAML==6.0.2
+          helm lint helm/https-edge-access \
+            --set enabled=true --set-string "stage=$HTTPS_STAGE" --set-string "hostname=$HTTPS_HOSTNAME" \
+            --set-string "certificateMap=$HTTPS_CERTIFICATE_MAP" --set-string "staticIpName=$HTTPS_STATIC_IP_NAME" \
+            --set-string "sslPolicyName=$HTTPS_SSL_POLICY" --set-string "oauthClientId=$IAP_OAUTH_CLIENT_ID"
+          helm template helpdesk-edge helm/https-edge-access -n "$NAMESPACE" \
+            --set enabled=true --set-string "stage=$HTTPS_STAGE" --set-string "hostname=$HTTPS_HOSTNAME" \
+            --set-string "certificateMap=$HTTPS_CERTIFICATE_MAP" --set-string "staticIpName=$HTTPS_STATIC_IP_NAME" \
+            --set-string "sslPolicyName=$HTTPS_SSL_POLICY" --set-string "oauthClientId=$IAP_OAUTH_CLIENT_ID" \
+            > "$RUNNER_TEMP/helpdesk-edge.yaml"
+          python .github/scripts/check-https-edge.py "$RUNNER_TEMP/helpdesk-edge.yaml" \
+            "$HTTPS_STAGE" "$HTTPS_HOSTNAME" "$HTTPS_CERTIFICATE_MAP" "$HTTPS_STATIC_IP_NAME" \
+            "$HTTPS_SSL_POLICY" "$IAP_OAUTH_CLIENT_ID"
+      - uses: google-github-actions/auth@v3
+        with:
+          project_id: helpdeskcloud-capstone-511905
+          workload_identity_provider: projects/260283083469/locations/global/workloadIdentityPools/helpdesk-github/providers/github-app-deploy-dev
+          service_account: helpdesk-app-deployer-dev@helpdeskcloud-capstone-511905.iam.gserviceaccount.com
+      - uses: google-github-actions/get-gke-credentials@v3
+        with:
+          project_id: helpdeskcloud-capstone-511905
+          cluster_name: helpdeskcloud-dev-gke
+          location: us-east1
+          use_dns_based_endpoint: true
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.17.3
+      - uses: azure/setup-kubectl@v4
+      - name: Confirm existing private app and validate the API server manifest
+        env:
+          CONFIRM_APPLICATION_ROUTE: ${{ inputs.confirm_application_route }}
+        run: |
+          set -euo pipefail
+          test "$(kubectl config current-context)" = "gke_${PROJECT_ID}_${REGION}_${CLUSTER}"
+          kubectl get deployment helpdesk-helpdesk -n "$NAMESPACE" -o json | jq -e \
+            '.spec.replicas == 2 and .status.readyReplicas == 2 and .status.availableReplicas == 2' >/dev/null
+          kubectl get service helpdesk-helpdesk -n "$NAMESPACE" -o json | jq -e '.spec.type == "ClusterIP"' >/dev/null
+          if [[ "$HTTPS_STAGE" == 'application' ]]; then
+            audience="/projects/260283083469/global/backendServices/${IAP_BACKEND_SERVICE_ID}"
+            kubectl get deployment helpdesk-helpdesk -n "$NAMESPACE" -o json | jq -e \
+              --arg audience "$audience" --arg email "$IAP_ALLOWED_EMAIL" \
+              '([.spec.template.spec.containers[] | select(.name == "helpdesk") | .env[]? | select(.name == "Iap__Enabled" and .value == "true")] | length) == 1 and
+               ([.spec.template.spec.containers[] | select(.name == "helpdesk") | .env[]? | select(.name == "Iap__ExpectedAudience" and .value == $audience)] | length) == 1 and
+               ([.spec.template.spec.containers[] | select(.name == "helpdesk") | .env[]? | select(.name == "Iap__AllowedEmail" and (.value | ascii_downcase) == ($email | ascii_downcase))] | length) == 1' >/dev/null || {
+                echo '::error::The running app is not enforcing IAP assertions for this exact backend and account.'
+                exit 1
+              }
+          fi
+          kubectl apply --dry-run=server -n "$NAMESPACE" -f "$RUNNER_TEMP/helpdesk-edge.yaml" >/dev/null
+      - name: Deliver the OAuth secret without exposing it in logs or Helm values
+        env:
+          IAP_OAUTH_CLIENT_SECRET: ${{ secrets.DEV_IAP_OAUTH_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          [[ -n "$IAP_OAUTH_CLIENT_SECRET" ]] || { echo '::error::Set the dev-app-deploy Environment secret DEV_IAP_OAUTH_CLIENT_SECRET.'; exit 1; }
+          umask 077
+          secret_file="$RUNNER_TEMP/iap-oauth-client-secret"
+          trap 'rm -f "$secret_file"' EXIT
+          printf '%s' "$IAP_OAUTH_CLIENT_SECRET" > "$secret_file"
+          kubectl create secret generic helpdesk-iap-oauth -n "$NAMESPACE" \
+            --from-file=key="$secret_file" --dry-run=client -o yaml |
+            kubectl apply --server-side --field-manager=helpdesk-iap-secret-delivery -f - >/dev/null
+      - name: Reconcile the separate HTTPS edge release
+        run: |
+          set -euo pipefail
+          helm upgrade --install helpdesk-edge helm/https-edge-access -n "$NAMESPACE" \
+            --set enabled=true --set-string "stage=$HTTPS_STAGE" --set-string "hostname=$HTTPS_HOSTNAME" \
+            --set-string "certificateMap=$HTTPS_CERTIFICATE_MAP" --set-string "staticIpName=$HTTPS_STATIC_IP_NAME" \
+            --set-string "sslPolicyName=$HTTPS_SSL_POLICY" --set-string "oauthClientId=$IAP_OAUTH_CLIENT_ID" \
+            --wait --timeout 10m
+          deadline=$((SECONDS + 900))
+          while (( SECONDS < deadline )); do
+            gateway_ok=$(kubectl get gateway helpdesk-dev-https -n "$NAMESPACE" -o json | jq -r 'any(.status.conditions[]?; .type == "Programmed" and .status == "True")')
+            route_ok=$(kubectl get httproute helpdesk-dev-https -n "$NAMESPACE" -o json | jq -r 'any(.status.parents[]?.conditions[]?; .type == "Accepted" and .status == "True") and any(.status.parents[]?.conditions[]?; .type == "ResolvedRefs" and .status == "True")')
+            backend_ok=$(kubectl get gcpbackendpolicy helpdesk-dev-iap -n "$NAMESPACE" -o json | jq -r 'any(.status.conditions[]?; .type == "Attached" and .status == "True")')
+            health_ok=$(kubectl get healthcheckpolicy helpdesk-dev-healthcheck -n "$NAMESPACE" -o json | jq -r 'any(.status.conditions[]?; .type == "Attached" and .status == "True")')
+            if [[ "$gateway_ok" == true && "$route_ok" == true && "$backend_ok" == true && "$health_ok" == true ]]; then break; fi
+            sleep 15
+          done
+          [[ "${gateway_ok:-false}" == true && "${route_ok:-false}" == true && "${backend_ok:-false}" == true && "${health_ok:-false}" == true ]] || {
+            kubectl describe gateway helpdesk-dev-https -n "$NAMESPACE" || true
+            kubectl describe httproute helpdesk-dev-https -n "$NAMESPACE" || true
+            kubectl describe gcpbackendpolicy helpdesk-dev-iap -n "$NAMESPACE" || true
+            kubectl describe healthcheckpolicy helpdesk-dev-healthcheck -n "$NAMESPACE" || true
+            echo '::error::GKE Gateway or required security policy did not become ready.'
+            exit 1
+          }
+          gateway_ip=$(kubectl get gateway helpdesk-dev-https -n "$NAMESPACE" -o json | jq -r '.status.addresses[]?.value | select(test("^([0-9]{1,3}\\.){3}[0-9]{1,3}$"))' | head -n1)
+          [[ -n "$gateway_ip" ]] || { echo '::error::Gateway has no external IPv4 address.'; exit 1; }
+          [[ "$gateway_ip" == "$HTTPS_STATIC_IP" ]] || { echo '::error::Gateway address does not match the retained Terraform static IP.'; exit 1; }
+          code=$(curl --silent --show-error --max-time 15 --output /dev/null --write-out '%{http_code}' \
+            --resolve "${HTTPS_HOSTNAME}:443:${gateway_ip}" "https://${HTTPS_HOSTNAME}/health/live")
+          [[ "$code" =~ ^(30[0-8]|401|403)$ ]] || { echo "::error::Anonymous HTTPS request was not denied by IAP (HTTP ${code})."; exit 1; }
+          if [[ "$HTTPS_STAGE" == 'application' ]]; then
+            for path in / /api/tickets; do
+              code=$(curl --silent --show-error --max-time 15 --output /dev/null --write-out '%{http_code}' \
+                --resolve "${HTTPS_HOSTNAME}:443:${gateway_ip}" "https://${HTTPS_HOSTNAME}${path}")
+              [[ "$code" =~ ^(30[0-8]|401|403)$ ]] || { echo "::error::Anonymous request to ${path} was not denied by IAP (HTTP ${code})."; exit 1; }
+            done
+          fi
+          echo "HTTPS ${HTTPS_STAGE} route is programmed at ${HTTPS_HOSTNAME}; anonymous request returned ${code}." >> "$GITHUB_STEP_SUMMARY"
