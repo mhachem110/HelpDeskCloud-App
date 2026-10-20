@@ -31,6 +31,7 @@ spec:
         - name: cloud-sql-proxy
           restartPolicy: Always
           image: "{{ required "proxy image repository required" .Values.cloudSqlProxy.image.repository }}@{{ .Values.cloudSqlProxy.image.digest }}"
+          # Probe the Pod-reachable HTTP listener while keeping SQL bound to loopback.
           args:
             - --private-ip
             - --address=127.0.0.1
@@ -71,7 +72,8 @@ spec:
                 if pg_isready -h 127.0.0.1 -p 5432 -U postgres -d helpdesk -q; then break; fi
                 sleep 5
               done
-              psql -h 127.0.0.1 -p 5432 -U postgres -d helpdesk -v ON_ERROR_STOP=1 -1 -f /schema/001_init.sql -f /schema/002_grants.sql
+              psql -h 127.0.0.1 -p 5432 -U postgres -d helpdesk -v ON_ERROR_STOP=1 -1 \
+                -f /schema/001_init.sql -f /schema/002_grants.sql
           resources:
             {{- toYaml .Values.migration.resources | nindent 12 }}
           securityContext:
