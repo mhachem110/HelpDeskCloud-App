@@ -30,6 +30,14 @@ rules:
     resources: [secretproviderclasses]
     resourceNames: [helpdesk-dev-db]
     verbs: [get]
+  # The independent helpdesk-edge Helm release may manage only these namespace
+  # resources. It cannot create GatewayClasses, CRDs, cluster roles or services.
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [gateways, httproutes]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [networking.gke.io]
+    resources: [gcpbackendpolicies, gcpgatewaypolicies, healthcheckpolicies]
+    verbs: [get, list, watch, create, update, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -1,0 +1,116 @@
+{{- if .Values.enabled }}
+{{- if not (has .Values.stage (list "health-only" "application")) }}
+{{- fail "stage must be health-only or application" }}
+{{- end }}
+{{- if not (regexMatch "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$" .Values.hostname) }}
+{{- fail "a single owner-controlled DNS hostname is required" }}
+{{- end }}
+{{- if not (regexMatch "^[a-z][a-z0-9-]{0,62}$" .Values.certificateMap) }}
+{{- fail "a Certificate Manager map name is required" }}
+{{- end }}
+{{- if not (regexMatch "^[a-z][a-z0-9-]{0,62}$" .Values.staticIpName) }}
+{{- fail "a reserved global static IP name is required" }}
+{{- end }}
+{{- if not (regexMatch "^[a-z][a-z0-9-]{0,62}$" .Values.sslPolicyName) }}
+{{- fail "an existing TLS 1.2+ SSL policy name is required" }}
+{{- end }}
+{{- if not (regexMatch "^[0-9]+-[a-z0-9]+\\.apps\\.googleusercontent\\.com$" .Values.oauthClientId) }}
+{{- fail "a configured Google OAuth client ID is required" }}
+{{- end }}
+{{- if ne .Values.oauthSecretName "helpdesk-iap-oauth" }}
+{{- fail "the IAP OAuth secret name is fixed to the reviewed namespace secret" }}
+{{- end }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: helpdesk-dev-https
+  namespace: helpdesk-dev
+  annotations:
+    networking.gke.io/certmap: {{ .Values.certificateMap | quote }}
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  addresses:
+    - type: NamedAddress
+      value: {{ .Values.staticIpName | quote }}
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      allowedRoutes:
+        namespaces:
+          from: Same
+      tls:
+        mode: Terminate
+---
+apiVersion: networking.gke.io/v1
+kind: GCPGatewayPolicy
+metadata:
+  name: helpdesk-dev-https-policy
+  namespace: helpdesk-dev
+spec:
+  default:
+    sslPolicy: {{ .Values.sslPolicyName | quote }}
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: helpdesk-dev-https
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: helpdesk-dev-https
+  namespace: helpdesk-dev
+spec:
+  parentRefs:
+    - name: helpdesk-dev-https
+      sectionName: https
+  hostnames:
+    - {{ .Values.hostname | quote }}
+  rules:
+    - matches:
+        - path:
+            type: {{ if eq .Values.stage "health-only" }}Exact{{ else }}PathPrefix{{ end }}
+            value: {{ if eq .Values.stage "health-only" }}"/health/live"{{ else }}"/"{{ end }}
+      backendRefs:
+        - name: helpdesk-helpdesk
+          port: 80
+---
+apiVersion: networking.gke.io/v1
+kind: GCPBackendPolicy
+metadata:
+  name: helpdesk-dev-iap
+  namespace: helpdesk-dev
+spec:
+  default:
+    iap:
+      enabled: true
+      oauth2ClientSecret:
+        name: {{ .Values.oauthSecretName | quote }}
+      clientID: {{ .Values.oauthClientId | quote }}
+  targetRef:
+    group: ""
+    kind: Service
+    name: helpdesk-helpdesk
+---
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: helpdesk-dev-healthcheck
+  namespace: helpdesk-dev
+spec:
+  default:
+    checkIntervalSec: 15
+    timeoutSec: 5
+    healthyThreshold: 2
+    unhealthyThreshold: 3
+    config:
+      type: HTTP
+      httpHealthCheck:
+        portSpecification: USE_FIXED_PORT
+        port: 8080
+        requestPath: /health/live
+  targetRef:
+    group: ""
+    kind: Service
+    name: helpdesk-helpdesk
+{{- end }}

@@ -1,0 +1,9 @@
+# Disabled until the owner has selected a domain and configured IAP OAuth.
+enabled: false
+stage: health-only
+hostname: ""
+certificateMap: ""
+staticIpName: ""
+sslPolicyName: ""
+oauthClientId: ""
+oauthSecretName: helpdesk-iap-oauth

@@ -41,6 +41,10 @@ serviceAccount:
   name: ""
   annotations: {}
   automountServiceAccountToken: false
+iap:
+  enabled: false
+  expectedAudience: ""
+  allowedEmail: ""
 cloudSqlProxy:
   enabled: false
   image:

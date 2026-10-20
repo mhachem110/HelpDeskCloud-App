@@ -1,6 +1,7 @@
 using System.Threading.RateLimiting;
 using HelpDeskCloud.Data;
 using HelpDeskCloud.Models;
+using HelpDeskCloud.Security;
 using HelpDeskCloud.Validation;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Npgsql;
@@ -9,6 +10,13 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Logging.AddJsonConsole();
 builder.Services.AddProblemDetails();
+var iapOptions = builder.Configuration.GetSection("Iap").Get<IapOptions>() ?? new IapOptions();
+if (iapOptions.Enabled &&
+    (string.IsNullOrWhiteSpace(iapOptions.ExpectedAudience) ||
+     string.IsNullOrWhiteSpace(iapOptions.AllowedEmail)))
+    throw new InvalidOperationException("IAP enforcement requires an expected audience and an approved email.");
+builder.Services.Configure<IapOptions>(builder.Configuration.GetSection("Iap"));
+builder.Services.AddHttpClient<IapAssertionValidator>(client => client.Timeout = TimeSpan.FromSeconds(5));
 builder.Services.AddHealthChecks().AddCheck<DatabaseHealthCheck>("postgresql", tags: ["ready"]);
 builder.Services.AddRateLimiter(options =>
 {
@@ -48,6 +56,7 @@ app.Use(async (context, next) =>
     context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
     await next(context);
 });
+app.UseMiddleware<IapAssertionMiddleware>();
 app.UseRateLimiter();
 app.UseDefaultFiles();
 app.UseStaticFiles();

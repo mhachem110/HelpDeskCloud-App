@@ -4,6 +4,7 @@ The edge access stack has a separate owner and approval lifecycle. This check is
 offline: it reads rendered YAML and never contacts Kubernetes or Google Cloud.
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -54,6 +55,19 @@ def check_release(documents):
     for container in pod.get("containers", []) + pod.get("initContainers", []):
         require(not any("hostPort" in port for port in container.get("ports", [])),
                 "application must not publish host ports")
+    app_containers = [container for container in pod.get("containers", []) if container.get("name") == "helpdesk"]
+    require(len(app_containers) == 1, "delivery must contain exactly one HelpDesk application container")
+    app_env = {item.get("name"): item.get("value") for item in app_containers[0].get("env", [])}
+    require(app_env.get("Iap__Enabled") in {"true", "false"}, "IAP enforcement must be an explicit boolean")
+    if app_env["Iap__Enabled"] == "true":
+        require(re.fullmatch(r"/projects/260283083469/global/backendServices/[0-9]+",
+                             app_env.get("Iap__ExpectedAudience", "")) is not None,
+                "IAP must use the exact Google project and numeric backend service audience")
+        require(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", app_env.get("Iap__AllowedEmail", "")) is not None,
+                "IAP must allow exactly one configured email address")
+    else:
+        require("Iap__ExpectedAudience" not in app_env and "Iap__AllowedEmail" not in app_env,
+                "IAP identity values must not be rendered while enforcement is disabled")
 
 
 def main():
