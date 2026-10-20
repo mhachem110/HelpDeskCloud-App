@@ -110,13 +110,19 @@ class SupportingDeliveryPolicyTests(unittest.TestCase):
         diagnostic_steps = [step for step in execute["steps"]
                             if "diagnostic" in step.get("name", "").lower()
                             or step.get("id", "").endswith("diagnostics")]
-        self.assertGreaterEqual(len(diagnostic_steps), 3)
+        self.assertEqual(len(diagnostic_steps), 2)
+        preflight = next(step for step in diagnostic_steps
+                         if step.get("id") == "plugin-diagnostics")
+        self.assertEqual(
+            preflight["continue-on-error"], "${{ inputs.mode == 'diagnostic' }}"
+        )
+        self.assertEqual(preflight["env"]["GKE_IAM_PROPAGATION_RETRY_SECONDS"], 480)
         for step in diagnostic_steps:
             if step.get("name") == "Finish diagnostics without entering the migration path":
                 self.assertIn("always()", step["if"])
                 self.assertIn("inputs.mode == 'diagnostic'", step["if"])
             else:
-                self.assertEqual(step.get("if"), "inputs.mode == 'diagnostic'")
+                self.assertNotIn("if", step)
         for name in ("Recheck target and bootstrap objects with the approved identity",
                      "Dry-run and create the Job once; never replace an existing Job"):
             step = next(step for step in execute["steps"] if step.get("name") == name)
@@ -124,13 +130,7 @@ class SupportingDeliveryPolicyTests(unittest.TestCase):
 
         credentials = [step for step in execute["steps"]
                        if str(step.get("uses", "")).startswith("google-github-actions/get-gke-credentials@")]
-        self.assertEqual(len(credentials), 1)
-        self.assertEqual(credentials[0]["with"]["use_auth_provider"], False)
-        for credential_step in credentials:
-            self.assertEqual(credential_step.get("if"), "inputs.mode == 'diagnostic'")
-            self.assertEqual(credential_step["with"]["use_dns_based_endpoint"], True)
-            self.assertEqual(credential_step["with"]["project_id"], "helpdeskcloud-capstone-511905")
-            self.assertEqual(credential_step["with"]["cluster_name"], "helpdeskcloud-dev-gke")
+        self.assertEqual(credentials, [])
 
         plugin_config = next(step for step in execute["steps"]
                              if step.get("name") == "Generate supported DNS-endpoint kubeconfig with the GKE exec plugin")
@@ -139,8 +139,8 @@ class SupportingDeliveryPolicyTests(unittest.TestCase):
         self.assertIn("container/use_application_default_credentials true", plugin_config["run"])
         finish = next(step for step in execute["steps"]
                       if step.get("name") == "Finish diagnostics without entering the migration path")
-        self.assertEqual(finish["env"]["TOKEN_RESULT"], "${{ steps.token-diagnostics.outcome }}")
         self.assertEqual(finish["env"]["PLUGIN_RESULT"], "${{ steps.plugin-diagnostics.outcome }}")
+        self.assertNotIn("TOKEN_RESULT", finish["env"])
         self.assertIn("exit 1", finish["run"])
 
         script = (ROOT / ".github/scripts/diagnose-dev-migration-connectivity.py").read_text()
