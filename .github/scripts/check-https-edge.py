@@ -48,7 +48,6 @@ def check_edge(documents, stage, hostname, certificate_map, static_ip, ssl_polic
     require(spec.get("listeners") == [{
         "name": "https", "protocol": "HTTPS", "port": 443,
         "allowedRoutes": {"namespaces": {"from": "Same"}},
-        "tls": {"mode": "Terminate"},
     }], "Gateway must expose exactly one same-namespace HTTPS listener on 443")
 
     gateway_policy = indexed["GCPGatewayPolicy"].get("spec", {})

@@ -39,8 +39,6 @@ spec:
       allowedRoutes:
         namespaces:
           from: Same
-      tls:
-        mode: Terminate
 ---
 apiVersion: networking.gke.io/v1
 kind: GCPGatewayPolicy
