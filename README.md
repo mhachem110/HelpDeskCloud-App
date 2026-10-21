@@ -1,184 +1,79 @@
-# HelpDesk Cloud — Application
+# HelpDesk Cloud Application
 
-A modern support-ticket platform built with **ASP.NET Core (.NET 10)**, **PostgreSQL**, **Docker**, and a **Kubernetes Helm chart**. The application repository is deliberately independent of the Terraform/GCP infrastructure repository.
+HelpDesk Cloud is a ticketing application built with ASP.NET Core on .NET 10, PostgreSQL 17, Docker, Helm and GKE Autopilot. This repository owns the service, container, Kubernetes application and HTTPS Gateway releases. The companion [Infrastructure repository](https://github.com/mhachem110/HelpDeskCloud-Infra) owns Terraform and Google Cloud infrastructure.
 
-> **Security/scope:** This is a functional capstone MVP, **not yet a publicly deployable authenticated product**. There is currently **no end-user login or authorization**. Do **not** expose it publicly, store real employee/customer data, or call it production-ready until an identity-aware ingress/authentication layer, HTTPS, backups, and platform controls have been configured and verified. Those belong in the infrastructure/security phases.
+## Deployed Dev service
 
-## What works now
+The verified Dev service is available at [helpdeskcloud.dynv6.net](https://helpdeskcloud.dynv6.net/). Google HTTPS Load Balancing and Identity-Aware Proxy protect the hostname. The owner has verified approved-account login, denial for an unauthorized account, ticket creation and persistence after refresh. Anonymous requests to the ticket API are denied by IAP. The .NET service also validates IAP-signed identity assertions as a second security boundary.
 
-- Responsive HelpDesk dashboard with summary cards, filter/search and status chart
-- Create, list, search, edit and delete IT tickets (status, priority, category, description)
-- PostgreSQL persistent ticket storage (shared by all app replicas)
-- Input validation in the API **and** PostgreSQL CHECK constraints; parameterized SQL
-- `/health/live` and `/health/ready` for Kubernetes probes
-- Rate limiting, basic browser security headers, non-root runtime image
-- Local `docker compose up` development environment (app + PostgreSQL)
-- GitHub Actions CI for .NET, Docker, Helm and digest-pinned supporting images
-- Manually dispatched, separately Environment-approved workflows prepared for supporting-image publication and the one-time Dev database migration
-- Existing Dev application delivery workflow remains disabled until its WIF, Environment, RBAC and repository-variable prerequisites are reviewed
-- No hardcoded cloud credentials or Terraform state in this repository
+The application runs as two GKE replicas behind the internal helpdesk-helpdesk ClusterIP Service. A Cloud SQL Auth Proxy sidecar reaches private PostgreSQL using Workload Identity. Google Secret Manager supplies the database connection through the GKE Secret Manager CSI integration. The public edge is an HTTPS-only Gateway with a Google-managed certificate map and an IAP-enabled backend. The public IPv4 address is 34.8.56.208. Stage and Prod are prepared in repository configuration but are not live deployments.
 
-## Dev GKE and Phase 8
+Known implementation evidence: [Terraform Dev Apply #45](https://github.com/mhachem110/HelpDeskCloud-Infra/actions/runs/39543113140), [App Dev delivery #17](https://github.com/mhachem110/HelpDeskCloud-App/actions/runs/39544035682), and [full HTTPS application route #20](https://github.com/mhachem110/HelpDeskCloud-App/actions/runs/39545212194). The owner separately verified the current live login and ticket persistence.
 
-The owner reports Terraform, the Dev GKE cluster, namespace bootstrap, restricted application login and Secret Manager versions are deployed. The supporting images remain unpublished, the one-time schema migration has not run, and application delivery remains disabled. The chart prepares two internal `ClusterIP` replicas, digest-pinned application and Cloud SQL Auth Proxy containers, and a separate migration Job. See the [Dev deployment guide](docs/GKE-DEPLOYMENT.md) and [Phase 8 activation checklist](docs/PHASE8.md). This App PR does not query or mutate cloud resources, read secret payloads, run a migration, publish images or expose the app publicly.
+## What the application provides
 
-## Quickest start — Docker Desktop
+- Responsive dashboard and REST API for creating, listing, searching, updating and deleting support tickets.
+- PostgreSQL persistence, parameterized SQL, validation in the API and database constraints.
+- Liveness and readiness health endpoints, rate limiting and browser security headers.
+- A non-root container and Helm charts for the app, database proxy and separate HTTPS Gateway release.
+- Application-side IAP JWT checks for signature, issuer, backend audience and approved email.
+- GitHub Actions for application CI, protected immutable-image publication, protected GKE delivery, separately gated supporting images and a one-time database migration.
 
-Requirements: [Docker Desktop](https://docs.docker.com/desktop/) with Linux containers. .NET does not need to be installed if using Docker.
+See [Architecture](docs/ARCHITECTURE.md), [Deployment](docs/DEPLOYMENT.md), [Rebuild](docs/REBUILD.md), [Demo](docs/DEMO.md), [Operations](docs/OPERATIONS.md) and the [code walkthrough](docs/CODE-WALKTHROUGH.md).
 
-1. Clone `mhachem110/HelpDeskCloud-App` and create a feature branch from `dev` for changes. For local use, switch to `dev` or a reviewed feature branch.
-2. In the project root, create your private `.env` file:
+## Local development with Docker Compose
 
-   ```powershell
-   Copy-Item .env.example .env
-   ```
+Requirements: Docker Desktop or Docker Engine with Compose. Compose binds only to loopback at http://localhost:8081 and maps that port to the container's port 8080.
 
-   Edit `.env` and change `POSTGRES_PASSWORD` to a unique local-only password. **Do not commit `.env`.**
+1. Create a local environment file and set a unique local password:
 
-3. Start the application:
+    Copy-Item .env.example .env
 
-   ```powershell
-   docker compose up --build -d
-   docker compose ps
-   ```
+2. Start the service and database:
 
-4. Open **http://localhost:8080** and create a sample ticket.
-5. Verify the API and health endpoints:
+    docker compose up --build -d
+    docker compose ps
 
-   ```powershell
-   Invoke-RestMethod http://localhost:8080/health/live
-   Invoke-RestMethod http://localhost:8080/health/ready
-   Invoke-RestMethod http://localhost:8080/api/tickets/stats
-   ```
+3. Open http://localhost:8081 and create a sample ticket. Check the API and health endpoints:
 
-6. View logs or stop containers:
+    Invoke-RestMethod http://localhost:8081/health/live
+    Invoke-RestMethod http://localhost:8081/health/ready
+    Invoke-RestMethod http://localhost:8081/api/tickets/stats
 
-   ```powershell
-   docker compose logs -f app
-   docker compose down
-   ```
+4. Follow logs or stop the containers:
 
-`docker compose down` preserves your ticket database in the Docker volume. `docker compose down -v` **deletes** the local database. Avoid `-v` unless you want a complete reset.
+    docker compose logs -f app
+    docker compose down
 
-**Important:** The SQL schema `database/init.sql` runs only when the PostgreSQL volume is *first created*. For a future change to database structure, add a versioned migration instead of editing the initial file and expecting a populated volume to reinitialize.
+Compose stores local data in the helpdesk_data volume. The command docker compose down -v deletes that local volume. Do not commit .env. The initial schema runs only when the local PostgreSQL data directory is first initialized; schema changes belong in versioned migrations.
 
-## Project structure
+For a direct .NET run, use the local PostgreSQL connection string and port 8081:
 
-```text
-HelpDeskCloud-App/
-├── .github/workflows/app-ci.yml                # credential-free application CI
-├── .github/workflows/supporting-images-ci.yml  # image scan, provenance and gated publish
-├── .github/workflows/dev-db-migration.yml      # separate approved one-time schema migration
-├── .github/workflows/app-dev-delivery.yml      # existing protected Dev application delivery
-├── .github/scripts/verify-dev-environment.sh  # fail-closed Environment policy check
-├── src/HelpDeskCloud/
-│   ├── Program.cs                       # minimal API routes and middleware
-│   ├── Data/                            # PostgreSQL repository and readiness probe
-│   ├── Models/                          # ticket request/response models
-│   ├── Validation/                      # ticket input validation
-│   ├── wwwroot/                         # accessible HTML/CSS/JS dashboard
-│   └── HelpDeskCloud.csproj
-├── tests/HelpDeskCloud.Tests/           # dependency-light test executable
-├── database/init.sql                         # initial PostgreSQL schema for local DB
-├── database/migration-client/Dockerfile     # pinned PostgreSQL 17.11 migration client
-├── helm/helpdesk/                       # base chart, Dev values, delivery overlay and one-time migration SQL
-├── docs/GKE-DEPLOYMENT.md              # approved first-deployment checkpoints
-├── docs/PHASE8.md                      # identity and delivery activation plan
-├── docs/FINAL-PROJECT-DEMO.md          # evidence-driven capstone walkthrough
-├── k8s/dev-delivery-rbac.yaml                # namespace-scoped application delivery access
-├── k8s/dev-migration-runner-rbac.yaml        # separate namespace-scoped migration access
-├── Dockerfile
-├── compose.yaml
-├── .env.example
-└── README.md
-```
+    $env:ConnectionStrings__Default='Host=localhost;Port=5432;Database=helpdesk;Username=helpdesk;Password=YOUR_LOCAL_PASSWORD'
+    dotnet run --project src/HelpDeskCloud --urls http://localhost:8081
 
-## Run without Docker for the application
+## Validation
 
-If you have .NET 10 SDK and a PostgreSQL database already started:
+Run the dependency-light .NET security and application checks:
 
-```powershell
-$env:ConnectionStrings__Default='Host=localhost;Port=5432;Database=helpdesk;Username=helpdesk;Password=YOUR_LOCAL_PASSWORD'
-dotnet run --project src/HelpDeskCloud --urls http://localhost:8080
-```
+    dotnet run --project tests/HelpDeskCloud.Tests -c Release
 
-You still need to apply `database/init.sql` to that database once. Prefer `docker compose up` to avoid manual setup.
+Run Python workflow, policy and chart checks:
 
-Validation tests:
+    python -m unittest discover -s tests -p 'test_*.py' -v
 
-```powershell
-dotnet run --project tests/HelpDeskCloud.Tests -c Release
-```
+GitHub CI also builds and scans the Docker image, lints and renders Helm configurations, validates Kubernetes schemas and scans the repository for secrets. CI runs on pull requests and pushes to dev, stage and prod. Path-aware jobs skip unrelated build groups while the workflow itself always starts so required PR checks report a result.
 
-The included test project covers request validation. It is **not** an end-to-end integration test of PostgreSQL, so verify ticket creation/editing/deletion through Docker Compose as well.
+## Repository map
 
-## REST API
+- .github/workflows/ — CI, protected Dev delivery, supporting-image release and one-time migration.
+- .github/scripts/ — fail-closed validation, change-scope detection and HTTPS/IAP edge checks.
+- src/HelpDeskCloud/ — HTTP API, database access, IAP security middleware and dashboard assets.
+- tests/ — .NET security tests and Python workflow, Helm and policy tests.
+- database/ — local initial schema and pinned PostgreSQL migration-client image.
+- helm/helpdesk/ — app Deployment, internal Service, proxy sidecar and CSI-backed database connection.
+- helm/https-edge-access/ — HTTPS Gateway, route, TLS policy, IAP backend policy and load-balancer health check.
+- k8s/ — namespace-scoped delivery and migration RBAC bootstrap manifests.
+- docs/history/ — implementation notes retained for historical context.
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| `GET` | `/api/info` | App metadata |
-| `GET` | `/api/tickets` | List latest 200; filters `status`, `priority`, `search` |
-| `GET` | `/api/tickets/stats` | Dashboard totals |
-| `GET` | `/api/tickets/{id}` | One ticket |
-| `POST` | `/api/tickets` | Create a new ticket |
-| `PUT` | `/api/tickets/{id}` | Update all editable fields |
-| `DELETE` | `/api/tickets/{id}` | Remove a ticket |
-| `GET` | `/health/live` | Process is running |
-| `GET` | `/health/ready` | PostgreSQL connection + tickets schema ready |
-
-Create request example:
-
-```json
-{
-  "title": "Cannot connect to VPN",
-  "description": "VPN times out after entering credentials.",
-  "category": "Network",
-  "priority": "High"
-}
-```
-
-Update request must also include `status`: `Open`, `In Progress`, or `Resolved`.
-
-## GitHub branching and CI
-
-This repo uses the agreed branch flow:
-
-```text
-feature/* --PR--> dev --PR--> stage --PR--> prod
-```
-
-`dev`, `stage`, and `prod` are protected. Pull requests run credential-free Application CI and, for `dev`, supporting-image build, architecture, command and Trivy checks. Trusted pushes to `dev` also create and verify GitHub SLSA provenance for the exact supporting-image archives. These jobs do not authenticate to Google Cloud or publish images.
-
-Supporting-image publication is manual-only, disabled until `DEV_SUPPORTING_IMAGES_PUBLISH_ENABLED=true`, and waits for the separately protected `dev-supporting-images-publish` Environment. It uses a dedicated WIF provider and repository-scoped Artifact Registry Writer grant. The one-time database migration has its own manual workflow, typed confirmation, `DEV_DB_MIGRATION_ENABLED` gate, WIF identity, namespace RBAC and `dev-db-migration` approval. The existing `app-dev-delivery.yml` keeps its separate `dev-app-publish` and `dev-app-deploy` gates; `DEV_APP_CD_ENABLED` stays unset until prerequisites and the migration are reviewed. See [Phase 8](docs/PHASE8.md) and [GKE deployment](docs/GKE-DEPLOYMENT.md) for the exact IAM, Environment, RBAC and repository-variable checklist.
-
-Stage and Production cloud resources, image repositories, identities and delivery workflows are out of scope. The Helm chart exposes only **ClusterIP**; do not add public ingress without approved authentication and HTTPS.
-
-## GKE deployment chart (prepared; rollout gated)
-
-The Dev chart uses digest-pinned app, proxy and migration-client images. Bootstrap resources and secrets stay outside the regular app release. The one-time migration runs only through its separately approved workflow; application upgrades keep migration disabled and the Service internal. Do not deploy with missing digests or bootstrap prerequisites. Public access remains out of scope until authentication and HTTPS are approved.
-
-## GCP security decisions
-
-- Cloud CI/CD uses separate GitHub OIDC Workload Identity Federation providers and service accounts, not service-account keys
-- Supporting-image publication, the one-time migration and app deployment use distinct Environment approvals
-- Runtime identity: GKE Workload Identity Federation with scoped Cloud SQL and secret access
-- Secrets: Google Secret Manager and restricted CSI delivery to pods
-- Database: private Cloud SQL for PostgreSQL
-- Authorization: identity-aware ingress / login and least-privilege authorization (**required before public release**)
-- Monitoring: use existing GKE/Cloud SQL Logging and Monitoring after rollout; no alert policy is claimed yet
-- The Helm chart exposes only **ClusterIP**, not a publicly reachable LoadBalancer
-
-## Operational cautions
-
-- This is **not** a multi-tenant helpdesk; no RBAC or tenant isolation exists yet.
-- `GET /api/tickets` is capped at 200 recent matches; production-grade pagination is future scope.
-- Deletes are permanent; future production changes should add soft delete/audit trail and backups.
-- The rate limiter is per-process and based on the directly observed client IP; a full ingress/WAF policy is still required.
-- No PostgreSQL schema auto-creation is done in production startup. Database changes will be deployed via a controlled migration step.
-- Requests fail cleanly when Cloud SQL is unavailable, but the system does not yet have queue-based resilience.
-
-## Reference GCP project
-
-Google Cloud project ID: `helpdeskcloud-capstone-511905`
-
-Infrastructure lives in a different repository: [HelpDeskCloud-Infra](https://github.com/mhachem110/HelpDeskCloud-Infra).
+The live schema migration has been completed. Rebuilding from scratch uses the runbook and requires an explicit, reviewed migration action. No routine deployment resets the database.

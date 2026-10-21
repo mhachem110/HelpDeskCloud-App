@@ -1,4 +1,4 @@
-# Disabled until the owner has selected a domain and configured IAP OAuth.
+# Disabled by default so each environment must explicitly supply its reviewed hostname and IAP client.
 enabled: false
 stage: health-only
 hostname: ""

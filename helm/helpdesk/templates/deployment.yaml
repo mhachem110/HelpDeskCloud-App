@@ -16,6 +16,7 @@ metadata:
     app.kubernetes.io/name: helpdesk
 spec:
   {{- if not .Values.autoscaling.enabled }}
+  # Two pods keep the service available while a rolling update replaces one replica.
   replicas: {{ .Values.replicaCount }}
   {{- end }}
   revisionHistoryLimit: 5

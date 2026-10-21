@@ -4,6 +4,7 @@
 {{- end }}
 apiVersion: v1
 kind: Service
+# ClusterIP keeps the application reachable only from the in-cluster Gateway.
 metadata:
   name: {{ include "helpdesk.fullname" . }}
   labels:

@@ -29,9 +29,30 @@ env:
   MIGRATION_IMAGE: postgres-client
 
 jobs:
+  changes:
+    name: Detect supporting-image inputs
+    runs-on: ubuntu-latest
+    outputs:
+      supporting_images: ${{ steps.scope.outputs.supporting_images }}
+    steps:
+      - name: Check out complete event history
+        uses: actions/checkout@v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select supporting-image validation
+        id: scope
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+          GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python .github/scripts/detect-ci-scope.py supporting-images "$GITHUB_OUTPUT"
+
   validate:
     name: Build, verify architecture and scan both supporting images
-    if: github.repository == 'mhachem110/HelpDeskCloud-App' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/dev')
+    needs: changes
+    if: needs.changes.outputs.supporting_images == 'true' && github.repository == 'mhachem110/HelpDeskCloud-App' && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/dev')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

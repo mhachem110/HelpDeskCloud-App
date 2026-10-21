@@ -30,8 +30,41 @@ jobs:
             *) echo '::error::Only feature/* → dev → stage → prod is allowed.'; exit 1 ;;
           esac
 
+  changes:
+    name: Detect validation scope and scan repository secrets
+    # Keep this workflow-level trigger broad so required PR checks always start; skip only jobs.
+    runs-on: ubuntu-latest
+    outputs:
+      dotnet: ${{ steps.scope.outputs.dotnet }}
+      container: ${{ steps.scope.outputs.container }}
+      helm: ${{ steps.scope.outputs.helm }}
+    steps:
+      - name: Check out complete event history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Select checks for changed files
+        id: scope
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+          GITHUB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          GITHUB_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python .github/scripts/detect-ci-scope.py app-ci "$GITHUB_OUTPUT"
+      - name: Scan repository for committed secrets
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          format: table
+          exit-code: '1'
+          severity: HIGH,CRITICAL
+
   validate:
     name: Build and validate .NET
+    needs: changes
+    if: needs.changes.outputs.dotnet == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -52,6 +85,8 @@ jobs:
 
   docker:
     name: Build container image
+    needs: changes
+    if: needs.changes.outputs.container == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -68,18 +103,10 @@ jobs:
           ignore-unfixed: true
           vuln-type: 'os,library'
           severity: CRITICAL
-      - name: Scan repository for committed secrets
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: secret
-          format: table
-          exit-code: '1'
-          severity: HIGH,CRITICAL
-
   helm:
     name: Validate Helm chart
+    needs: changes
+    if: needs.changes.outputs.helm == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

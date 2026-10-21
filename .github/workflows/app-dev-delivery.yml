@@ -3,6 +3,17 @@ name: Application Dev delivery
 on:
   push:
     branches: [dev]
+    # Release only when a runtime image or the reviewed app deployment inputs change.
+    # workflow_dispatch remains available for an owner-reviewed redeploy.
+    paths:
+      - "src/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "helm/helpdesk/**"
+      - "helm/https-edge-access/**"
+      - ".github/scripts/check-https-edge.py"
+      - ".github/scripts/check-private-release.py"
+      - ".github/scripts/verify-dev-environment.sh"
   workflow_dispatch:
     inputs:
       https_stage:
@@ -258,7 +269,7 @@ jobs:
     if: github.repository == 'mhachem110/HelpDeskCloud-App' && github.ref == 'refs/heads/dev' && github.event_name == 'workflow_dispatch' && inputs.https_stage != 'none'
     environment: dev-app-deploy
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       actions: read
       contents: read
@@ -378,6 +389,8 @@ jobs:
             --set-string "certificateMap=$HTTPS_CERTIFICATE_MAP" --set-string "staticIpName=$HTTPS_STATIC_IP_NAME" \
             --set-string "sslPolicyName=$HTTPS_SSL_POLICY" --set-string "oauthClientId=$IAP_OAUTH_CLIENT_ID" \
             --wait --timeout 10m
+          # Kubernetes conditions prove the controller accepted the objects; the external probes below
+          # separately wait for Google's load balancer to serve every newly configured app path.
           deadline=$((SECONDS + 900))
           while (( SECONDS < deadline )); do
             gateway_ok=$(kubectl get gateway helpdesk-dev-https -n "$NAMESPACE" -o json | jq -r 'any(.status.conditions[]?; .type == "Programmed" and .status == "True")')
@@ -398,29 +411,96 @@ jobs:
           gateway_ip=$(kubectl get gateway helpdesk-dev-https -n "$NAMESPACE" -o json | jq -r '.status.addresses[]?.value | select(test("^([0-9]{1,3}\\.){3}[0-9]{1,3}$"))' | head -n1)
           [[ -n "$gateway_ip" ]] || { echo '::error::Gateway has no external IPv4 address.'; exit 1; }
           [[ "$gateway_ip" == "$HTTPS_STATIC_IP" ]] || { echo '::error::Gateway address does not match the retained Terraform static IP.'; exit 1; }
-          probe_error_file="$RUNNER_TEMP/https-probe.stderr"
-          code=''
-          curl_exit=0
-          probe_deadline=$((SECONDS + 300))
+          probe_paths=(/health/live)
+          if [[ "$HTTPS_STAGE" == 'application' ]]; then
+            probe_paths=(/ /api/tickets /health/live)
+          fi
+          declare -A probe_ok=()
+          declare -A probe_result=()
+          declare -A probe_code=()
+          declare -A probe_header_file=()
+          declare -A probe_error_file=()
+          probe_deadline=$((SECONDS + 600))
           while (( SECONDS < probe_deadline )); do
-            if code=$(curl --silent --show-error --max-time 15 --output /dev/null --write-out '%{http_code}' \
-              --resolve "${HTTPS_HOSTNAME}:443:${gateway_ip}" "https://${HTTPS_HOSTNAME}/health/live" 2>"$probe_error_file"); then
-              [[ "$code" =~ ^(30[0-8]|401|403)$ ]] && break
-            else
-              curl_exit=$?
-            fi
+            pending=false
+            for path in "${probe_paths[@]}"; do
+              [[ "${probe_ok[$path]:-false}" == true ]] && continue
+              case "$path" in
+                /) label=root ;;
+                /api/tickets) label=api-tickets ;;
+                /health/live) label=health-live ;;
+                *) label=path ;;
+              esac
+              header_file="$RUNNER_TEMP/iap-${label}.headers"
+              error_file="$RUNNER_TEMP/iap-${label}.stderr"
+              probe_header_file[$path]="$header_file"
+              probe_error_file[$path]="$error_file"
+              if code=$(curl --silent --show-error --max-time 15 --output /dev/null --dump-header "$header_file" \
+                --write-out '%{http_code}' --resolve "${HTTPS_HOSTNAME}:443:${gateway_ip}" \
+                "https://${HTTPS_HOSTNAME}${path}" 2>"$error_file"); then
+                probe_code[$path]="$code"
+                if result=$(python .github/scripts/check-https-edge.py --check-iap-response \
+                  "$code" "$header_file" "$IAP_OAUTH_CLIENT_ID" 2>/dev/null); then
+                  probe_ok[$path]=true
+                  probe_result[$path]="$result"
+                  continue
+                fi
+              else
+                probe_code[$path]="curl failed"
+              fi
+              pending=true
+            done
+            [[ "$pending" == false ]] && break
             sleep 15
           done
-          [[ "$code" =~ ^(30[0-8]|401|403)$ ]] || {
-            [[ -s "$probe_error_file" ]] && cat "$probe_error_file"
-            echo "::error::Anonymous HTTPS request was not denied by IAP after the frontend readiness window (HTTP ${code:-none}, curl exit ${curl_exit})."
-            exit 1
-          }
-          if [[ "$HTTPS_STAGE" == 'application' ]]; then
-            for path in / /api/tickets; do
-              code=$(curl --silent --show-error --max-time 15 --output /dev/null --write-out '%{http_code}' \
-                --resolve "${HTTPS_HOSTNAME}:443:${gateway_ip}" "https://${HTTPS_HOSTNAME}${path}")
-              [[ "$code" =~ ^(30[0-8]|401|403)$ ]] || { echo "::error::Anonymous request to ${path} was not denied by IAP (HTTP ${code})."; exit 1; }
-            done
-          fi
-          echo "HTTPS ${HTTPS_STAGE} route is programmed at ${HTTPS_HOSTNAME}; anonymous request returned ${code}." >> "$GITHUB_STEP_SUMMARY"
+          for path in "${probe_paths[@]}"; do
+            if [[ "${probe_ok[$path]:-false}" != true ]]; then
+              if [[ -n "${probe_code[$path]:-}" && -f "${probe_header_file[$path]:-}" ]]; then
+                python .github/scripts/check-https-edge.py --check-iap-response \
+                  "${probe_code[$path]}" "${probe_header_file[$path]}" "$IAP_OAUTH_CLIENT_ID" || true
+              elif [[ -s "${probe_error_file[$path]:-}" ]]; then
+                cat "${probe_error_file[$path]}"
+              fi
+              echo "::error::Anonymous HTTPS request to ${path} did not reach the expected IAP denial within the 10-minute frontend readiness window (latest result: ${probe_code[$path]:-no response})."
+              exit 1
+            fi
+          done
+
+          kubectl get deployment helpdesk-helpdesk -n "$NAMESPACE" -o json | jq -e \
+            '.spec.replicas == 2 and .status.readyReplicas == 2 and .status.availableReplicas == 2' >/dev/null
+          kubectl get service helpdesk-helpdesk -n "$NAMESPACE" -o json | jq -e '.spec.type == "ClusterIP"' >/dev/null
+          kubectl get gcpbackendpolicy helpdesk-dev-iap -n "$NAMESPACE" -o json | jq -e \
+            --arg client "$IAP_OAUTH_CLIENT_ID" \
+            '.spec.default.iap.enabled == true and .spec.default.iap.clientID == $client and
+             any(.status.conditions[]?; .type == "Attached" and .status == "True")' >/dev/null
+          helm_revision=$(helm history helpdesk-edge -n "$NAMESPACE" -o json | jq -r '.[-1].revision')
+          ready_replicas=$(kubectl get deployment helpdesk-helpdesk -n "$NAMESPACE" -o json | jq -r '"\(.status.readyReplicas // 0)/\(.spec.replicas)"')
+          {
+            echo '## HTTPS edge deployment verified'
+            echo "- Stage: ${HTTPS_STAGE}"
+            echo "- Hostname: ${HTTPS_HOSTNAME}"
+            echo "- Gateway: Programmed=True at ${gateway_ip} (controller status and external load-balancer probes passed)"
+            echo "- Helm release revision: ${helm_revision}"
+            echo "- IAP backend policy: enabled and Attached=True"
+            echo "- Application replicas: ${ready_replicas} Ready; Service type is ClusterIP"
+            if [[ "$HTTPS_STAGE" == 'application' ]]; then
+              echo "- Application JWT audience: GKE backend service ID ${IAP_BACKEND_SERVICE_ID}"
+            fi
+            echo '- Anonymous request checks:'
+            for path in "${probe_paths[@]}"; do echo "  - ${path}: ${probe_result[$path]}"; done
+            echo "- Workflow run: [#${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Summarize failed HTTPS edge delivery
+        if: failure()
+        env:
+          STAGE: ${{ inputs.https_stage }}
+          HOSTNAME: ${{ vars.DEV_HTTPS_HOSTNAME }}
+        run: |
+          {
+            echo '## HTTPS edge deployment failed'
+            echo "- Stage: ${STAGE}"
+            echo "- Hostname: ${HOSTNAME}"
+            echo '- Review the failed step for the sanitized Gateway, IAP, TLS or anonymous-request check.'
+            echo "- Workflow run: [#${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -11,6 +11,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Logging.AddJsonConsole();
 builder.Services.AddProblemDetails();
 var iapOptions = builder.Configuration.GetSection("Iap").Get<IapOptions>() ?? new IapOptions();
+// A protected Dev release must fail at startup if its second IAP validation layer is misconfigured.
 if (iapOptions.Enabled &&
     (string.IsNullOrWhiteSpace(iapOptions.ExpectedAudience) ||
      string.IsNullOrWhiteSpace(iapOptions.AllowedEmail)))
@@ -56,6 +57,7 @@ app.Use(async (context, next) =>
     context.Response.Headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
     await next(context);
 });
+// IAP authenticates at the Gateway; the app verifies Google's signed assertion again before routes.
 app.UseMiddleware<IapAssertionMiddleware>();
 app.UseRateLimiter();
 app.UseDefaultFiles();
