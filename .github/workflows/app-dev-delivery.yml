@@ -398,9 +398,24 @@ jobs:
           gateway_ip=$(kubectl get gateway helpdesk-dev-https -n "$NAMESPACE" -o json | jq -r '.status.addresses[]?.value | select(test("^([0-9]{1,3}\\.){3}[0-9]{1,3}$"))' | head -n1)
           [[ -n "$gateway_ip" ]] || { echo '::error::Gateway has no external IPv4 address.'; exit 1; }
           [[ "$gateway_ip" == "$HTTPS_STATIC_IP" ]] || { echo '::error::Gateway address does not match the retained Terraform static IP.'; exit 1; }
-          code=$(curl --silent --show-error --max-time 15 --output /dev/null --write-out '%{http_code}' \
-            --resolve "${HTTPS_HOSTNAME}:443:${gateway_ip}" "https://${HTTPS_HOSTNAME}/health/live")
-          [[ "$code" =~ ^(30[0-8]|401|403)$ ]] || { echo "::error::Anonymous HTTPS request was not denied by IAP (HTTP ${code})."; exit 1; }
+          probe_error_file="$RUNNER_TEMP/https-probe.stderr"
+          code=''
+          curl_exit=0
+          probe_deadline=$((SECONDS + 300))
+          while (( SECONDS < probe_deadline )); do
+            if code=$(curl --silent --show-error --max-time 15 --output /dev/null --write-out '%{http_code}' \
+              --resolve "${HTTPS_HOSTNAME}:443:${gateway_ip}" "https://${HTTPS_HOSTNAME}/health/live" 2>"$probe_error_file"); then
+              [[ "$code" =~ ^(30[0-8]|401|403)$ ]] && break
+            else
+              curl_exit=$?
+            fi
+            sleep 15
+          done
+          [[ "$code" =~ ^(30[0-8]|401|403)$ ]] || {
+            [[ -s "$probe_error_file" ]] && cat "$probe_error_file"
+            echo "::error::Anonymous HTTPS request was not denied by IAP after the frontend readiness window (HTTP ${code:-none}, curl exit ${curl_exit})."
+            exit 1
+          }
           if [[ "$HTTPS_STAGE" == 'application' ]]; then
             for path in / /api/tickets; do
               code=$(curl --silent --show-error --max-time 15 --output /dev/null --write-out '%{http_code}' \
