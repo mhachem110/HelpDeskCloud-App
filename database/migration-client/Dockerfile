@@ -3,7 +3,7 @@
 FROM alpine:3.24@sha256:d56c381f961d307a21b3ca004cf1e3910f106644aefb1f43e654c8a56c4fd395
 
 RUN apk add --no-cache \
-      ca-certificates=20260909-r0 \
+      ca-certificates=20261020-r0 \
       postgresql17-client=17.11-r0 \
     && command -v psql \
     && command -v pg_isready \
