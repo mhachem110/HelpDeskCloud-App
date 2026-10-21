@@ -64,10 +64,14 @@ Run Python workflow, policy and chart checks:
 
 GitHub CI also builds and scans the Docker image, lints and renders Helm configurations, validates Kubernetes schemas and scans the repository for secrets. CI runs on pull requests and pushes to dev, stage and prod. Path-aware jobs skip unrelated build groups while the workflow itself always starts so required PR checks report a result.
 
+Application CI validates proposed code and manifests without Google credentials. The separate App Dev delivery workflow can publish and deploy only through its existing path-filtered push or protected manual release gates. Shared .NET restore/build/test commands live in `.github/scripts/verify-dotnet.sh` so CI and a reviewed release run the same checks. This helper and the accompanying documentation, policy tests and workflow updates are outside the delivery push paths.
+
+`database/init.sql` is the canonical initial schema used by local Docker Compose. Helm requires `helm/helpdesk/files/001_init.sql` at its existing path, so `check-schema-parity.py` and its offline unit test verify the mirror stays byte-for-byte identical. The schema files were not changed. The database migration workflow remains manual-only, uses the separately protected `dev-db-migration` Environment and the dedicated migration service account, and keeps read-only connectivity diagnostics separate from the migration Job.
+
 ## Repository map
 
 - .github/workflows/ — CI, protected Dev delivery, supporting-image release and one-time migration.
-- .github/scripts/ — fail-closed validation, change-scope detection and HTTPS/IAP edge checks.
+- .github/scripts/ — shared .NET checks, schema parity, fail-closed validation, change-scope detection and HTTPS/IAP edge checks.
 - src/HelpDeskCloud/ — HTTP API, database access, IAP security middleware and dashboard assets.
 - tests/ — .NET security tests and Python workflow, Helm and policy tests.
 - database/ — local initial schema and pinned PostgreSQL migration-client image.

@@ -21,6 +21,7 @@ GROUPS = {
             "tests/HelpDeskCloud.Tests/**",
             ".github/workflows/app-ci.yml",
             ".github/scripts/detect-ci-scope.py",
+            ".github/scripts/verify-dotnet.sh",
         ),
         "container": (
             "src/**",

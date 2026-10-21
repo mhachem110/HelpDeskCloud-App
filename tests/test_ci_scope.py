@@ -24,8 +24,12 @@ class CiScopeTests(unittest.TestCase):
 
     def test_helm_and_policy_changes_select_manifest_validation(self):
         for path in ("helm/helpdesk/templates/deployment.yaml", "k8s/dev-delivery-rbac.yaml",
-                     "tests/test_https_edge.py", ".github/scripts/check-https-edge.py"):
+                     "tests/test_https_edge.py", "tests/test_schema_parity.py",
+                     ".github/scripts/check-https-edge.py", ".github/scripts/check-schema-parity.py"):
             self.assertTrue(scope.group_is_relevant("app-ci", "helm", {path}), path)
+
+    def test_shared_dotnet_helper_selects_dotnet_validation(self):
+        self.assertTrue(scope.group_is_relevant("app-ci", "dotnet", {".github/scripts/verify-dotnet.sh"}))
 
     def test_supporting_image_changes_do_not_select_the_application_container_group(self):
         changed = {"database/migration-client/Dockerfile"}

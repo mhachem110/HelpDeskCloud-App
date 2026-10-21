@@ -140,6 +140,7 @@ jobs:
           EXPECTED_ENVIRONMENT: dev-db-migration
         run: bash .github/scripts/verify-dev-environment.sh
 
+      # The migration identity is separate from the app runtime and delivery identities.
       - uses: google-github-actions/auth@v3
         with:
           project_id: helpdeskcloud-capstone-511905
