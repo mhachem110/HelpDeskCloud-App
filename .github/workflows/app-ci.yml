@@ -1,5 +1,6 @@
 name: Application CI
 
+# Run repository checks for pull requests, branch promotions, and manual validation requests.
 on:
   pull_request:
     branches: [dev, stage, prod]
@@ -7,14 +8,18 @@ on:
     branches: [dev, stage, prod]
   workflow_dispatch:
 
+# CI needs repository read access only; no cloud credentials or deployment permissions are granted.
 permissions:
   contents: read
 
+# Cancel stale CI on the same branch because these jobs only validate source and publish no artifacts.
+# Cancel older validation on the same workflow/ref so newer commits get the available runner time.
 concurrency:
   group: app-ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # Reject pull requests that do not follow the agreed feature -> dev -> stage -> prod path.
   promotion-route:
     name: Check promotion route
     if: github.event_name == 'pull_request'
@@ -30,6 +35,7 @@ jobs:
             *) echo '::error::Only feature/* → dev → stage → prod is allowed.'; exit 1 ;;
           esac
 
+  # Always run scope detection and secret scanning; expose flags for the heavier validation jobs.
   changes:
     name: Detect validation scope and scan repository secrets
     # Keep this workflow-level trigger broad so required PR checks always start; skip only jobs.
@@ -61,6 +67,7 @@ jobs:
           exit-code: '1'
           severity: HIGH,CRITICAL
 
+  # Build and test .NET only when the changed-file classifier selects application code.
   validate:
     name: Build and validate .NET
     needs: changes
@@ -77,6 +84,7 @@ jobs:
       - name: Restore, build and test the reviewed application source
         run: bash .github/scripts/verify-dotnet.sh
 
+  # Build and scan the container locally in CI; this job does not publish an image.
   docker:
     name: Build container image
     needs: changes
@@ -97,6 +105,7 @@ jobs:
           ignore-unfixed: true
           vuln-type: 'os,library'
           severity: CRITICAL
+  # Lint, render, and schema-check Helm resources when chart inputs changed.
   helm:
     name: Validate Helm chart
     needs: changes

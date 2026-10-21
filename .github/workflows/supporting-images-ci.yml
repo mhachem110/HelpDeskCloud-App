@@ -1,5 +1,6 @@
 name: Supporting images CI and gated publication
 
+# Validate, attest, and optionally publish the pinned proxy and migration-client images.
 on:
   pull_request:
     branches: [dev]
@@ -13,13 +14,16 @@ on:
         type: boolean
         default: false
 
+# Validation and attestation use no cloud publishing rights; the gated publish job adds OIDC separately.
 permissions:
   contents: read
 
+# Serialize runs for the same ref so uploaded review archives cannot be confused across runs.
 concurrency:
   group: supporting-images-${{ github.ref }}
   cancel-in-progress: false
 
+# Pinned source image, registry destination, and output names shared across the validation and publish stages.
 env:
   PROJECT_ID: helpdeskcloud-capstone-511905
   REGION: us-east1
@@ -29,6 +33,7 @@ env:
   MIGRATION_IMAGE: postgres-client
 
 jobs:
+  # Detect whether either supporting-image source changed; only relevant changes need image validation.
   changes:
     name: Detect supporting-image inputs
     runs-on: ubuntu-latest
@@ -49,6 +54,7 @@ jobs:
           GITHUB_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: python .github/scripts/detect-ci-scope.py supporting-images "$GITHUB_OUTPUT"
 
+  # Verify architecture and versions, scan both images, and archive the exact scanned artifacts.
   validate:
     name: Build, verify architecture and scan both supporting images
     needs: changes
@@ -121,6 +127,7 @@ jobs:
           compression-level: 0
           if-no-files-found: error
 
+  # Sign and verify provenance for the validated artifacts before any publication is possible.
   attest:
     name: Attest and verify supporting-image build provenance
     needs: validate
@@ -164,6 +171,7 @@ jobs:
           done
           echo 'Both scanned image archives have verified GitHub SLSA provenance.' >> "$GITHUB_STEP_SUMMARY"
 
+  # Optional manual publication: require explicit opt-in and Environment approval, then push unique immutable tags.
   publish:
     name: Separately approved supporting-image publication
     needs: [validate, attest]

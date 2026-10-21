@@ -1,5 +1,6 @@
 name: Application Dev delivery
 
+# Dev delivery is path-filtered on push; manual dispatch can request an ordinary release or an HTTPS stage.
 on:
   push:
     branches: [dev]
@@ -28,13 +29,16 @@ on:
         type: boolean
         default: false
 
+# Keep repository access read-only by default; approved cloud jobs request OIDC explicitly.
 permissions:
   contents: read
 
+# Keep package, publish, deploy, and HTTPS operations serialized for this Dev target.
 concurrency:
   group: application-dev-delivery
   cancel-in-progress: false
 
+# Dev destination and image names shared by the package, publish, and deploy jobs.
 env:
   PROJECT_ID: helpdeskcloud-capstone-511905
   REGION: us-east1
@@ -43,6 +47,7 @@ env:
   IMAGE_REPOSITORY: us-east1-docker.pkg.dev/helpdeskcloud-capstone-511905/helpdeskcloud-dev-images/helpdeskcloud
 
 jobs:
+  # Test, build and scan one immutable image from the triggering commit, then pass that exact archive forward.
   package:
     name: Test, build and scan reviewed source
     if: github.repository == 'mhachem110/HelpDeskCloud-App' && github.ref == 'refs/heads/dev' && vars.DEV_APP_CD_ENABLED == 'true' && (github.event_name != 'workflow_dispatch' || inputs.https_stage == 'none')
@@ -81,6 +86,7 @@ jobs:
           compression-level: 0
           if-no-files-found: error
 
+  # Publish the scanned archive with a commit/run tag and record the resulting registry digest.
   publish:
     name: Approved Dev image publication
     needs: package
@@ -130,6 +136,7 @@ jobs:
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "Published ${image}@${digest}" >> "$GITHUB_STEP_SUMMARY"
 
+  # Deploy only the digest produced above, after protected-environment approval and release validation.
   deploy:
     name: Approved Dev GKE deployment
     needs: publish
@@ -259,6 +266,7 @@ jobs:
             echo 'Dev Deployment: 2 ready replicas, internal ClusterIP, health checks passed.'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # Optional manual route-stage operation; reconcile the separate HTTPS edge release without rebuilding the app.
   https-edge:
     name: Separately approved HTTPS edge stage
     if: github.repository == 'mhachem110/HelpDeskCloud-App' && github.ref == 'refs/heads/dev' && github.event_name == 'workflow_dispatch' && inputs.https_stage != 'none'

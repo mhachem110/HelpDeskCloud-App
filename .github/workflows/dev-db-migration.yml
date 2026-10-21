@@ -1,5 +1,6 @@
 name: Approved Dev database migration
 
+# Manual workflow with separate read-only diagnostics and one-time migration modes.
 on:
   workflow_dispatch:
     inputs:
@@ -17,13 +18,16 @@ on:
         type: string
         default: DO NOT RUN
 
+# Keep repository access read-only by default; only the approved execute job requests OIDC.
 permissions:
   contents: read
 
+# Prevent two runs from racing to create the fixed one-time migration Job.
 concurrency:
   group: helpdesk-dev-schema-001
   cancel-in-progress: false
 
+# Fixed Dev target names ensure the diagnostic and one-time migration address the same resources.
 env:
   PROJECT_ID: helpdeskcloud-capstone-511905
   REGION: us-east1
@@ -34,6 +38,7 @@ env:
   JOB_NAME: helpdesk-dev-schema-001
 
 jobs:
+  # Check the protected ref, feature flag, selected mode, and exact typed confirmation before credentials.
   preflight:
     name: Check diagnostic or migration dispatch gates
     if: github.repository == 'mhachem110/HelpDeskCloud-App'
@@ -63,6 +68,7 @@ jobs:
               ;;
           esac
 
+  # Render the digest-pinned Job without cloud access so reviewers can inspect the exact manifest.
   render:
     name: Lint and render the one-time Job without cloud credentials
     needs: preflight
@@ -113,6 +119,8 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  # Diagnostics stop after read-only connectivity checks; migration mode requires Environment approval
+  # and creates the named Job once only if it is absent.
   execute:
     name: Read-only diagnostics or separately approved one-time schema migration
     needs: [preflight, render]
