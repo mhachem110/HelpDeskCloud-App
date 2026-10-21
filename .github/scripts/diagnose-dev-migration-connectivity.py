@@ -463,13 +463,11 @@ def prepare_api_kubeconfig(kubeconfig: str, lines: list[str]) -> tuple[bool, str
         if not token_ok:
             return False, None, None
 
-        _, selected_auth, selected_status = kubeconfig_user_auth(config)
-        if selected_auth is None or selected_status != "readable":
-            lines.append("Kubeconfig auth entry could not be safely prepared for the API probes.")
-            return False, None, None
-        selected_auth.pop("exec", None)
-        selected_auth.pop("auth-provider", None)
-        selected_auth["token"] = token
+        # `auth` is the already-validated user selected by the minified context.
+        # Reusing it avoids parsing the same kubeconfig entry a second time.
+        auth.pop("exec", None)
+        auth.pop("auth-provider", None)
+        auth["token"] = token
         token_config_path: str | None = None
         try:
             descriptor, token_config_path = tempfile.mkstemp(
