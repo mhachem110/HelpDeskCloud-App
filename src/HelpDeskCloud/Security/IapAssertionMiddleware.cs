@@ -27,6 +27,8 @@ public sealed class IapAssertionMiddleware(RequestDelegate next, IOptions<IapOpt
         await next(context);
     }
 
+    // Google load-balancer and Kubernetes probes need these health signals; the public Gateway
+    // still enforces IAP before external requests can reach either endpoint.
     public static bool RequiresIapAssertion(PathString path) =>
         !path.Equals("/health/live", StringComparison.OrdinalIgnoreCase) &&
         !path.Equals("/health/ready", StringComparison.OrdinalIgnoreCase);

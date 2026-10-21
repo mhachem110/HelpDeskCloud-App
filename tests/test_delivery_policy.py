@@ -75,11 +75,14 @@ class DeliveryPolicyTests(unittest.TestCase):
     def test_https_probe_retries_frontend_startup_without_weakening_tls_or_iap(self):
         workflow = (ROOT / ".github/workflows/app-dev-delivery.yml").read_text(encoding="utf-8")
         edge_step = workflow.split("- name: Reconcile the separate HTTPS edge release", 1)[1].split("- name:", 1)[0]
-        self.assertIn("probe_deadline=$((SECONDS + 300))", edge_step)
+        self.assertIn("probe_deadline=$((SECONDS + 600))", edge_step)
         self.assertIn("while (( SECONDS < probe_deadline ))", edge_step)
+        self.assertIn("probe_paths=(/ /api/tickets /health/live)", edge_step)
+        self.assertIn("--dump-header", edge_step)
         self.assertIn('--resolve "${HTTPS_HOSTNAME}:443:${gateway_ip}"', edge_step)
-        self.assertIn("^(30[0-8]|401|403)$", edge_step)
+        self.assertIn("--check-iap-response", edge_step)
         self.assertNotIn("--insecure", edge_step)
+        self.assertIn("x-goog-iap-generated-response", (ROOT / ".github/scripts/check-https-edge.py").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

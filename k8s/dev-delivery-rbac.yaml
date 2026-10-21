@@ -33,9 +33,11 @@ rules:
   # The independent helpdesk-edge Helm release may manage only these namespace
   # resources. It cannot create GatewayClasses, CRDs, cluster roles or services.
   - apiGroups: [gateway.networking.k8s.io]
+    # The app workflow owns only namespaced Gateway and route reconciliation.
     resources: [gateways, httproutes]
     verbs: [get, list, watch, create, update, patch]
   - apiGroups: [networking.gke.io]
+    # These policies attach TLS, IAP and health checks to the app's namespaced backend.
     resources: [gcpbackendpolicies, gcpgatewaypolicies, healthcheckpolicies]
     verbs: [get, list, watch, create, update, patch]
 ---

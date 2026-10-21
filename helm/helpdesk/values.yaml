@@ -42,6 +42,7 @@ serviceAccount:
   annotations: {}
   automountServiceAccountToken: false
 iap:
+  # The protected Dev release opts in only after its deployment preflight succeeds.
   enabled: false
   expectedAudience: ""
   allowedEmail: ""

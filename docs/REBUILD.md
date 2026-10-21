@@ -1,0 +1,28 @@
+# Dev rebuild runbook
+
+This runbook documents dependency order for a new Dev environment. It is not an instruction to destroy or recreate the existing service. Preserve the current GCS state, live resources, tickets and Secret Manager versions. A rebuild requires separate owner review of exact Terraform plans and protected GitHub Environment approvals.
+
+## External prerequisites
+
+Have an authorized Google Cloud administrator, GitHub repository administrator and DNS owner available. OAuth client credentials, the approved Google test user, dynv6 DNS control and any required one-time API enablement are external inputs; secrets are not stored in Git. Stage and Prod are prepared, not live.
+
+## Dependency order
+
+1. **Project and APIs.** Confirm project helpdeskcloud-capstone-511905, project number 260283083469 and required Compute, Service Networking, Artifact Registry, SQL Admin, GKE, IAM, Secret Manager, Certificate Manager and IAP APIs. Enable an API only through the approved administrator procedure.
+2. **Terraform prerequisites.** Install Terraform 1.16.2 and retain the committed provider lock files. Confirm the existing GCS bucket helpdeskcloud-tfstate-511905 and expected root prefixes. Do not rename, copy or migrate state.
+3. **Network.** Review and apply the terraform/ root plan for the VPC, subnet, secondary ranges and private services access. Network state addresses are established and must be preserved.
+4. **Registry, Cloud SQL and GKE.** Apply the reviewed core plan in its established dependency sequence. Cloud SQL PostgreSQL uses private IP and the VPC's service networking connection; deletion protection remains on. GKE Autopilot uses the same network and Workload Identity.
+5. **IAM and identities.** Verify GKE node service-account image-pull/runtime permissions and separate app and migration service accounts. Workload Identity bindings depend on the cluster pool existing. Preserve the Terraform identity and its owner-approved roles/iap.admin grant.
+6. **Repository delivery identities.** Validate exact GitHub WIF providers, workflow filename/ref conditions, project and separate app-publish, app-deploy, supporting-image and migration identities. Keep short-lived OIDC; do not introduce service-account keys.
+7. **Secrets.** Through an approved secret-bootstrap procedure, create or update required Secret Manager versions without printing payloads. Grant access only to intended Kubernetes service accounts. Terraform manages secret metadata and IAM; secret payloads remain external.
+8. **Namespace and Kubernetes RBAC.** Create namespace helpdesk-dev and apply k8s/dev-delivery-rbac.yaml and k8s/dev-migration-runner-rbac.yaml before app and maintenance workflows. These define separate namespace-scoped Roles and RoleBindings, including Gateway API and GKE policy resources; neither identity receives cluster-admin. Reapply after a cluster rebuild.
+9. **Supporting images.** Run the manual supporting-image workflow through its protected Environment. Review pinned upstream versions, architecture and scans; publish and record immutable proxy and PostgreSQL migration-client digests.
+10. **Database schema.** Confirm private connectivity and the restricted runtime database account. For an empty replacement database only, review the one-time initial schema migration workflow. The live database already has its schema; never replay initial SQL against it. Future changes use versioned migrations.
+11. **Application release.** Run CI on reviewed source. Publish the scanned app image under the protected dev-app-publish Environment, then deploy that exact digest under dev-app-deploy. Wait for two ready replicas, readiness probes, internal ClusterIP Service and database connectivity.
+12. **HTTPS foundation.** In the isolated https-foundation root, review the plan for reserved IP, managed certificate, map and TLS policy. Configure the owner-controlled DNS authorization record at the selected DNS provider. OAuth credentials and DNS provider access stay external.
+13. **OAuth and IAP identity.** Configure the expected Google OAuth client and secret in the approved secret store. Grant only the approved user roles/iap.httpsResourceAccessor on the exact active backend. Preserve the Terraform service account's roles/iap.admin as requested by the owner.
+14. **Backend identity and JWT audience.** Read backend service ID from Google Cloud control-plane metadata without exposing secrets. For the current backend, the expected numeric ID is 4800183520372038985. Configure the application audience as the canonical IAP audience for that backend and the single approved email. The .NET validator verifies Google's signature, issuer, audience and email.
+15. **Gateway.** Apply the separate https-access Terraform root for the IAP user grant only after the backend exists. Install the helpdesk-edge Helm release with the verified hostname, certificate map, static address, SSL policy and OAuth client. Use HTTPS on port 443; do not add an HTTP listener.
+16. **DNS and smoke checks.** Point helpdeskcloud.dynv6.net to 34.8.56.208 only after the certificate and Gateway are ready. Confirm HTTPS with normal TLS verification, IAP login for the approved user, denial for another account, anonymous API denial, ticket creation and persistence. Record workflow URLs and resulting immutable digests without recording ticket data or credentials.
+
+The two SQL files are used by separate packaging paths: database/init.sql initializes local Compose PostgreSQL, while helm/helpdesk/files/001_init.sql packages SQL for the manual Helm migration Job. They are currently identical and checked by tests. Keep both consumers working if the canonical source is changed.

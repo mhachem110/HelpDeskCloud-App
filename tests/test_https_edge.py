@@ -92,6 +92,40 @@ class HttpsEdgeGuardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.check(docs)
 
+    def test_accepts_iap_generated_google_oauth_redirect(self):
+        headers = "\r\n".join([
+            "HTTP/2 302",
+            "X-Goog-IAP-Generated-Response: true",
+            "Location: https://accounts.google.com/o/oauth2/v2/auth?client_id=123-test.apps.googleusercontent.com",
+            "",
+        ])
+        result = edge.check_iap_response(302, headers, "123-test.apps.googleusercontent.com")
+        self.assertIn("Google OAuth", result)
+
+    def test_accepts_iap_generated_anonymous_api_denial(self):
+        self.assertIn("HTTP 401", edge.check_iap_response(
+            401, "\r\n".join(["HTTP/2 401", "X-Goog-IAP-Generated-Response: true", ""]), "unused"))
+        self.assertIn("HTTP 403", edge.check_iap_response(
+            403, "\r\n".join(["HTTP/2 403", "X-Goog-IAP-Generated-Response: true", ""]), "unused"))
+
+    def test_rejects_arbitrary_redirects_and_unmarked_denials(self):
+        with self.assertRaises(ValueError):
+            edge.check_iap_response(302, "\r\n".join(["HTTP/2 302", "Location: https://evil.example/login", ""]), "client")
+        with self.assertRaises(ValueError):
+            edge.check_iap_response(403, "\r\n".join(["HTTP/2 403", ""]), "client")
+
+    def test_rejects_wrong_oauth_client_and_http_sign_in(self):
+        with self.assertRaises(ValueError):
+            edge.check_iap_response(302, "\r\n".join([
+                "HTTP/2 302", "X-Goog-IAP-Generated-Response: true",
+                "Location: https://accounts.google.com/o/oauth2/v2/auth?client_id=other", "",
+            ]), "expected")
+        with self.assertRaises(ValueError):
+            edge.check_iap_response(302, "\r\n".join([
+                "HTTP/2 302", "X-Goog-IAP-Generated-Response: true",
+                "Location: http://accounts.google.com/o/oauth2/v2/auth?client_id=expected", "",
+            ]), "expected")
+
 
 if __name__ == "__main__":
     unittest.main()
