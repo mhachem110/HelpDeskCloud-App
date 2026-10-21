@@ -20,8 +20,7 @@ def manifests(stage="health-only"):
          "spec": {"gatewayClassName": "gke-l7-global-external-managed",
                   "addresses": [{"type": "NamedAddress", "value": "helpdesk-https-ip"}],
                   "listeners": [{"name": "https", "protocol": "HTTPS", "port": 443,
-                                 "allowedRoutes": {"namespaces": {"from": "Same"}},
-                                 "tls": {"mode": "Terminate"}}]}},
+                                 "allowedRoutes": {"namespaces": {"from": "Same"}}}]}},
         {"apiVersion": "networking.gke.io/v1", "kind": "GCPGatewayPolicy",
          "metadata": {"name": "helpdesk-dev-https-policy", "namespace": "helpdesk-dev"},
          "spec": {"default": {"sslPolicy": "helpdesk-tls"}, "targetRef": {
@@ -60,6 +59,12 @@ class HttpsEdgeGuardTests(unittest.TestCase):
     def test_rejects_public_http_listener(self):
         docs = manifests()
         docs[0]["spec"]["listeners"].append({"name": "http", "protocol": "HTTP", "port": 80})
+        with self.assertRaises(ValueError):
+            self.check(docs)
+
+    def test_rejects_incomplete_tls_block_with_certificate_map(self):
+        docs = manifests()
+        docs[0]["spec"]["listeners"][0]["tls"] = {"mode": "Terminate"}
         with self.assertRaises(ValueError):
             self.check(docs)
 
